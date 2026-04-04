@@ -8,12 +8,27 @@ import android.os.Environment
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -21,15 +36,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.window.Dialog
-
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -44,16 +50,26 @@ class MainActivity : ComponentActivity() {
         setContent { ShttsApp() }
     }
 
-    override fun onResume() {
-        super.onResume()
-        // Permission refresh happens inside the composable via LaunchedEffect
-    }
-
     @Composable
     fun ShttsApp() {
         val context = LocalContext.current
         val prefs = remember { getSharedPreferences("shttps_prefs", MODE_PRIVATE) }
         val clipboard = LocalClipboardManager.current
+        
+        // Theme State
+        val systemDark = isSystemInDarkTheme()
+        var manualDarkTheme by remember { 
+            val saved = if (prefs.contains("is_dark")) prefs.getBoolean("is_dark", false) else null
+            mutableStateOf(saved) 
+        }
+        val isDark = manualDarkTheme ?: systemDark
+
+        // Colors
+        val Blue = if (isDark) Color(0xFF8AB4F8) else Color(0xFF1A73E8)
+        val Red = if (isDark) Color(0xFFF28B82) else Color(0xFFEA4335)
+        val Green = if (isDark) Color(0xFF81C995) else Color(0xFF34A853)
+        val BgColor = if (isDark) Color(0xFF1A1C20) else Color(0xFFE0E5EC)
+        val TextColor = if (isDark) Color(0xFFE1E2E5) else Color(0xFF44475A)
 
         // State
         var hasPermission by remember { mutableStateOf(checkAllFilesAccess()) }
@@ -70,304 +86,258 @@ class MainActivity : ComponentActivity() {
         var showFolderPicker by remember { mutableStateOf(false) }
         var showQr by remember { mutableStateOf(false) }
 
-        // Refresh on every recompose (catches permission grant from settings)
         LaunchedEffect(Unit) {
             hasPermission = checkAllFilesAccess()
         }
 
-        val Green = Color(0xFF34a853)
-        val Blue  = Color(0xFF1a73e8)
-        val Red   = Color(0xFFea4335)
-        val BgCard = Color(0xFFF8F9FA)
-
         MaterialTheme {
-            Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFFF1F3F4)) {
+            Surface(modifier = Modifier.fillMaxSize(), color = BgColor) {
                 Column(modifier = Modifier.fillMaxSize()) {
 
-                    // ─── App Bar ───────────────────────────────────────────────────────────
+                    // ─── Header ──────────────────────────────────────────────────────────
                     Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Blue)
-                            .padding(horizontal = 20.dp, vertical = 16.dp)
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 24.dp)
                     ) {
-                        Column {
-                            Text("Share File", fontSize = 24.sp, fontWeight = FontWeight.Bold,
-                                color = Color.White, letterSpacing = 2.sp)
-                            Text("HTTP File Server", fontSize = 12.sp, color = Color.White.copy(alpha = 0.7f))
+                        Column(modifier = Modifier.align(Alignment.CenterStart)) {
+                            Text(
+                                "Share File",
+                                fontSize = 28.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Blue
+                            )
+                            Text(
+                                "Secure Local Hosting",
+                                fontSize = 11.sp,
+                                color = TextColor.copy(alpha = 0.6f),
+                                letterSpacing = 1.sp
+                            )
+                        }
+                        
+                        // Theme Toggle
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .size(44.dp)
+                                .neumorphicShadow(CircleShape, if(isDark) Color(0xFF2E3238) else Color.White, if(isDark) Color(0xFF0F1113) else Color(0xFFA3B1C6).copy(alpha = 0.6f), isDark)
+                                .background(BgColor, CircleShape)
+                                .clickable { 
+                                    manualDarkTheme = !isDark 
+                                    prefs.edit().putBoolean("is_dark", !isDark).apply()
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(if (isDark) "☀️" else "🌙", fontSize = 18.sp)
                         }
                     }
 
                     LazyColumn(
-                        modifier = Modifier.fillMaxSize().padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        modifier = Modifier.fillMaxSize().weight(1f).padding(horizontal = 20.dp),
+                        verticalArrangement = Arrangement.spacedBy(24.dp)
                     ) {
-
-                        // ─── Permission Banner ─────────────────────────────────────────────
+                        // ─── Permission ───────────────────────────────────────────────────
                         if (!hasPermission) {
                             item {
-                                Card(
-                                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
-                                    modifier = Modifier.fillMaxWidth(),
-                                    border = BorderStroke(1.dp, Color(0xFFFF9800))
-                                ) {
-                                    Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                NeumorphicCard(bgColor = Color(0xFFFFF3E0), isDark = isDark) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
                                         Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFFF9800))
                                         Spacer(Modifier.width(12.dp))
                                         Column(Modifier.weight(1f)) {
-                                            Text("Storage Access Required", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                            Text("Grant 'All Files Access' to browse and share freely.", fontSize = 12.sp, color = Color.Gray)
+                                            Text("Files Access Needed", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color.Black)
+                                            Text("Required to share your folders.", fontSize = 11.sp, color = Color.Black.copy(alpha = 0.6f))
                                         }
                                         Button(
                                             onClick = { requestAllFilesAccess() },
                                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9800))
-                                        ) { Text("Grant") }
+                                        ) { Text("Grant", fontSize = 12.sp) }
                                     }
                                 }
                             }
                         }
 
-                        // ─── Root Folder ───────────────────────────────────────────────────
+                        // ─── Root Folder ──────────────────────────────────────────────────
                         item {
-                            Card(
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = CardDefaults.cardColors(containerColor = Color.White),
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Column(modifier = Modifier.padding(16.dp)) {
-                                    Text("Shared Folder", fontSize = 11.sp, color = Color.Gray,
-                                        fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
-                                    Spacer(Modifier.height(8.dp))
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Default.Folder, contentDescription = null,
-                                            tint = Color(0xFFFFA000), modifier = Modifier.size(28.dp))
-                                        Spacer(Modifier.width(12.dp))
-                                        Text(
-                                            text = selectedRoot.absolutePath,
-                                            fontSize = 13.sp,
-                                            modifier = Modifier.weight(1f),
-                                            color = Color(0xFF333333),
-                                            maxLines = 2
-                                        )
-                                    }
-                                    Spacer(Modifier.height(12.dp))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        OutlinedButton(
-                                            onClick = { showFolderPicker = true },
-                                            modifier = Modifier.weight(1f)
-                                        ) {
-                                            Icon(Icons.Default.FolderOpen, contentDescription = null,
-                                                modifier = Modifier.size(16.dp))
-                                            Spacer(Modifier.width(6.dp))
-                                            Text("Browse...", fontSize = 13.sp)
-                                        }
-                                        // Quick-select root
-                                        if (hasPermission) {
-                                            OutlinedButton(
-                                                onClick = {
-                                                    selectedRoot = Environment.getExternalStorageDirectory()
-                                                    prefs.edit().putString("root_path", selectedRoot.absolutePath).apply()
-                                                    logs.add("Root: ${selectedRoot.absolutePath}")
-                                                },
-                                                modifier = Modifier.weight(1f)
-                                            ) {
-                                                Icon(Icons.Default.Phone, contentDescription = null,
-                                                    modifier = Modifier.size(16.dp))
-                                                Spacer(Modifier.width(6.dp))
-                                                Text("Internal", fontSize = 13.sp)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // ─── Server Control ────────────────────────────────────────────────
-                        item {
-                            Card(
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = CardDefaults.cardColors(containerColor = Color.White),
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Column(modifier = Modifier.padding(16.dp)) {
-                                    Text("Server", fontSize = 11.sp, color = Color.Gray,
-                                        fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
-                                    Spacer(Modifier.height(12.dp))
-
-                                    // Port field
-                                    OutlinedTextField(
-                                        value = port,
-                                        onValueChange = { v ->
-                                            if (v.length <= 5 && v.all { it.isDigit() }) port = v
-                                        },
-                                        label = { Text("Port", fontSize = 13.sp) },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        enabled = !isRunning,
-                                        singleLine = true,
-                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                        leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) }
+                            NeumorphicCard(isDark = isDark) {
+                                Text("SHARED DIRECTORY", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
+                                Spacer(Modifier.height(16.dp))
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Folder, contentDescription = null, tint = Color(0xFFFFA000), modifier = Modifier.size(32.dp))
+                                    Spacer(Modifier.width(16.dp))
+                                    Text(
+                                        text = selectedRoot.absolutePath,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = TextColor,
+                                        maxLines = 2
                                     )
-
-                                    Spacer(Modifier.height(12.dp))
-
-                                    // Start / Stop button
-                                    Button(
-                                        onClick = {
-                                            if (isRunning) {
-                                                fileServer?.stop()
-                                                isRunning = false
-                                                serverUrl = ""
-                                                logs.add("Server stopped.")
-                                            } else {
-                                                val p = port.toIntOrNull() ?: 8080
-                                                val listener = object : FileServer.OnServerListener {
-                                                    override fun onStarted(ip: String, port: Int) {
-                                                        serverUrl = "http://$ip:$port"
-                                                        isRunning = true
-                                                        logs.add("Started: $serverUrl")
-                                                    }
-                                                    override fun onStopped() { isRunning = false; logs.add("Stopped.") }
-                                                    override fun onError(msg: String) { logs.add("ERROR: $msg") }
-                                                    override fun onLog(msg: String) { logs.add(msg) }
-                                                }
-                                                fileServer = FileServer(p, selectedRoot, listener)
-                                                fileServer?.start()
-                                                prefs.edit().putInt("port", p).apply()
-                                            }
-                                        },
-                                        modifier = Modifier.fillMaxWidth().height(50.dp),
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = if (isRunning) Red else Green
-                                        ),
-                                        shape = RoundedCornerShape(10.dp)
+                                }
+                                Spacer(Modifier.height(20.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                    NeumorphicButton(
+                                        onClick = { showFolderPicker = true },
+                                        modifier = Modifier.weight(1f),
+                                        accentColor = Blue,
+                                        isDark = isDark
                                     ) {
-                                        Icon(
-                                            if (isRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
-                                            contentDescription = null
-                                        )
+                                        Icon(Icons.Default.Search, null, Modifier.size(18.dp))
                                         Spacer(Modifier.width(8.dp))
-                                        Text(
-                                            if (isRunning) "STOP SERVER" else "START SERVER",
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 15.sp
-                                        )
+                                        Text("Browse", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                    NeumorphicButton(
+                                        onClick = {
+                                            selectedRoot = Environment.getExternalStorageDirectory()
+                                            prefs.edit().putString("root_path", selectedRoot.absolutePath).apply()
+                                            logs.add("Switched to Internal Storage")
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                        accentColor = TextColor,
+                                        isDark = isDark
+                                    ) {
+                                        Icon(Icons.Default.Smartphone, null, Modifier.size(18.dp))
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Internal", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                     }
                                 }
                             }
                         }
 
-                        // ─── URL + QR (shown when running) ────────────────────────────────
-                        if (isRunning && serverUrl.isNotEmpty()) {
-                            item {
-                                Card(
+                        // ─── Server Status ────────────────────────────────────────────────
+                        item {
+                            NeumorphicCard(isDark = isDark) {
+                                Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E9)),
-                                    border = BorderStroke(1.dp, Green),
-                                    shape = RoundedCornerShape(12.dp)
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Column(modifier = Modifier.padding(16.dp)) {
-                                        Text("Server is Running ●", fontWeight = FontWeight.Bold,
-                                            color = Green, fontSize = 14.sp)
-                                        Spacer(Modifier.height(10.dp))
+                                    Column {
+                                        Text("SERVER STATUS", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Box(Modifier.size(8.dp).background(if (isRunning) Green else Red, CircleShape))
+                                            Spacer(Modifier.width(8.dp))
+                                            Text(if (isRunning) "Running" else "Stopped", fontWeight = FontWeight.Bold, color = TextColor)
+                                        }
+                                    }
+                                    // Port Input
+                                    Box(
+                                        Modifier.width(80.dp).background(BgColor.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                                            .border(1.dp, TextColor.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+                                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    ) {
+                                        BasicTextField(
+                                            value = port,
+                                            onValueChange = { newValue -> 
+                                                if (newValue.length <= 5 && newValue.all { it.isDigit() }) port = newValue 
+                                            },
+                                            enabled = !isRunning,
+                                            textStyle = TextStyle(color = TextColor, fontWeight = FontWeight.Bold, fontSize = 14.sp),
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                            singleLine = true
+                                        )
+                                    }
+                                }
 
-                                        // URL row
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .background(Color(0xFFF1F8E9), RoundedCornerShape(8.dp))
-                                                .padding(12.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = serverUrl,
-                                                fontSize = 15.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = Blue,
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            // Copy
-                                            IconButton(onClick = {
-                                                clipboard.setText(AnnotatedString(serverUrl))
-                                                logs.add("Copied URL.")
-                                            }) {
-                                                Icon(Icons.Default.ContentCopy, contentDescription = "Copy",
-                                                    tint = Blue, modifier = Modifier.size(20.dp))
+                                if (isRunning && serverUrl.isNotEmpty()) {
+                                    Spacer(Modifier.height(20.dp))
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .background(TextColor.copy(alpha = 0.05f), RoundedCornerShape(12.dp))
+                                            .padding(12.dp)
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(serverUrl, modifier = Modifier.weight(1f), color = Blue, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                            IconButton(onClick = { clipboard.setText(AnnotatedString(serverUrl)); logs.add("Copied URL") }) {
+                                                Icon(Icons.Default.ContentCopy, null, tint = Blue, modifier = Modifier.size(18.dp))
                                             }
-                                            // Share
-                                            IconButton(onClick = {
-                                                val i = Intent(Intent.ACTION_SEND)
-                                                i.type = "text/plain"
-                                                i.putExtra(Intent.EXTRA_TEXT, serverUrl)
-                                                context.startActivity(Intent.createChooser(i, "Share via"))
-                                            }) {
-                                                Icon(Icons.Default.Share, contentDescription = "Share",
-                                                    tint = Green, modifier = Modifier.size(20.dp))
-                                            }
-                                            // QR
                                             IconButton(onClick = { showQr = true }) {
-                                                Icon(Icons.Default.QrCode, contentDescription = "QR",
-                                                    tint = Color(0xFF333333), modifier = Modifier.size(20.dp))
+                                                Icon(Icons.Default.QrCode, null, tint = TextColor, modifier = Modifier.size(18.dp))
                                             }
                                         }
                                     }
+                                }
+
+                                Spacer(Modifier.height(24.dp))
+                                NeumorphicButton(
+                                    onClick = {
+                                        if (isRunning) {
+                                            fileServer?.stop()
+                                            isRunning = false
+                                            serverUrl = ""
+                                            logs.add("Stopped server")
+                                        } else {
+                                            val p = port.toIntOrNull() ?: 8080
+                                            val listener = object : FileServer.OnServerListener {
+                                                override fun onStarted(ip: String, port: Int) {
+                                                    serverUrl = "http://$ip:$port"
+                                                    isRunning = true
+                                                    logs.add("Started @ $serverUrl")
+                                                }
+                                                override fun onStopped() { isRunning = false; logs.add("Server down") }
+                                                override fun onError(msg: String) { logs.add("ERR: $msg") }
+                                                override fun onLog(msg: String) { logs.add(msg) }
+                                            }
+                                            fileServer = FileServer(p, selectedRoot, listener)
+                                            fileServer?.start()
+                                            prefs.edit().putInt("port", p).apply()
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth().height(56.dp),
+                                    accentColor = if (isRunning) Red else Green,
+                                    isDark = isDark
+                                ) {
+                                    Icon(if (isRunning) Icons.Default.PowerSettingsNew else Icons.Default.PlayArrow, null)
+                                    Spacer(Modifier.width(12.dp))
+                                    Text(if (isRunning) "STOP SERVER" else "START SERVER", fontWeight = FontWeight.Black)
                                 }
                             }
                         }
 
                         // ─── Activity Log ─────────────────────────────────────────────────
                         item {
-                            Card(
-                                modifier = Modifier.fillMaxWidth().height(200.dp),
-                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text("Activity Log", color = Color(0xFF9E9E9E), fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
-                                        if (logs.isNotEmpty()) {
-                                            TextButton(onClick = { logs.clear() }) {
-                                                Text("Clear", color = Color(0xFF666666), fontSize = 11.sp)
-                                            }
-                                        }
-                                    }
-                                    Spacer(Modifier.height(4.dp))
-
+                            NeumorphicCard(bgColor = if (isDark) Color(0xFF121212) else Color(0xFFF1F3F4), isDark = isDark) {
+                                Text("REMOTE ACTIVITY", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
+                                Spacer(Modifier.height(12.dp))
+                                Box(modifier = Modifier.fillMaxWidth().height(140.dp)) {
                                     val listState = rememberLazyListState()
-                                    LaunchedEffect(logs.size) {
-                                        if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1)
-                                    }
-
-                                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                                    LaunchedEffect(logs.size) { if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1) }
+                                    LazyColumn(state = listState) {
                                         items(logs) { entry ->
-                                            Text(
-                                                text = "> $entry",
-                                                color = Color(0xFF4CAF50),
-                                                fontSize = 11.sp,
-                                                fontFamily = FontFamily.Monospace,
-                                                modifier = Modifier.padding(vertical = 1.dp)
-                                            )
-                                        }
-                                        if (logs.isEmpty()) {
-                                            item {
-                                                Text("Waiting for connections...",
-                                                    color = Color(0xFF555555), fontSize = 11.sp,
-                                                    fontFamily = FontFamily.Monospace)
-                                            }
+                                            Text("> $entry", color = Green, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(vertical = 2.dp))
                                         }
                                     }
                                 }
                             }
                         }
 
-                    } // end LazyColumn
+                        item { Spacer(Modifier.height(20.dp)) }
+                    }
+
+                    // ─── Footer ──────────────────────────────────────────────────────────
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            "Developed by saheermk",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextColor.copy(alpha = 0.7f),
+                            modifier = Modifier.clickable {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://saheermk.pages.dev")))
+                            }
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                            SocialIcon(Icons.Default.Public, isDark = isDark) {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/saheermk/")))
+                            }
+                            SocialIcon(Icons.Default.Share, isDark = isDark) {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://in.linkedin.com/in/saheermk")))
+                            }
+                        }
+                    }
                 }
 
-                // ─── Folder Picker Dialog ─────────────────────────────────────────────────
+                // Dialogs
                 if (showFolderPicker) {
                     FolderPickerDialog(
                         initialDir = selectedRoot,
@@ -375,36 +345,26 @@ class MainActivity : ComponentActivity() {
                         onFolderSelected = { dir ->
                             selectedRoot = dir
                             prefs.edit().putString("root_path", dir.absolutePath).apply()
-                            logs.add("Folder: ${dir.absolutePath}")
+                            logs.add("Path changed")
                             if (isRunning) fileServer?.setRootDir(dir)
                         }
                     )
                 }
 
-                // ─── QR Code Dialog ───────────────────────────────────────────────────────
                 if (showQr && serverUrl.isNotEmpty()) {
                     Dialog(onDismissRequest = { showQr = false }) {
-                        Surface(shape = RoundedCornerShape(16.dp), color = Color.White) {
-                            Column(
-                                modifier = Modifier.padding(24.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Text("Scan to Open", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        NeumorphicCard(bgColor = Color.White, isDark = false) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Scan to access", fontWeight = FontWeight.Black, fontSize = 16.sp, color = Color.Black)
                                 Spacer(Modifier.height(16.dp))
                                 val qrBmp = remember(serverUrl) { generateQrBitmap(serverUrl) }
                                 if (qrBmp != null) {
-                                    Image(
-                                        bitmap = qrBmp.asImageBitmap(),
-                                        contentDescription = "QR Code",
-                                        modifier = Modifier.size(240.dp)
-                                    )
-                                } else {
-                                    Text("Failed to generate QR.", color = Color.Red)
+                                    Image(bitmap = qrBmp.asImageBitmap(), contentDescription = "QR", modifier = Modifier.size(200.dp))
                                 }
-                                Spacer(Modifier.height(12.dp))
-                                Text(serverUrl, fontSize = 12.sp, color = Color.Gray)
                                 Spacer(Modifier.height(16.dp))
-                                Button(onClick = { showQr = false }) { Text("Close") }
+                                NeumorphicButton(onClick = { showQr = false }, accentColor = Blue, isDark = false) {
+                                    Text("CLOSE", fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
@@ -418,7 +378,7 @@ class MainActivity : ComponentActivity() {
             Environment.isExternalStorageManager()
         } else {
             checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) ==
-                android.content.pm.PackageManager.PERMISSION_GRANTED
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
         }
     }
 
@@ -433,4 +393,135 @@ class MainActivity : ComponentActivity() {
             ), 100)
         }
     }
+}
+
+// ─── Skeuomorphic (Neumorphic) UI Components ───────────────────────────────
+
+@Composable
+fun NeumorphicCard(
+    modifier: Modifier = Modifier,
+    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(24.dp),
+    bgColor: Color? = null,
+    isDark: Boolean = isSystemInDarkTheme(),
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val bg = bgColor ?: if (isDark) Color(0xFF1A1C20) else Color(0xFFE0E5EC)
+    val shadowLight = if (isDark) Color(0xFF2E3238) else Color.White
+    val shadowDark = if (isDark) Color(0xFF0F1113) else Color(0xFFA3B1C6).copy(alpha = 0.6f)
+
+    Box(
+        modifier = modifier
+            .neumorphicShadow(shape, shadowLight, shadowDark, isDark)
+            .background(bg, shape)
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            content()
+        }
+    }
+}
+
+@Composable
+fun NeumorphicButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    accentColor: Color = Color(0xFF1A73E8),
+    isDark: Boolean = isSystemInDarkTheme(),
+    content: @Composable RowScope.() -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    
+    val bg = if (isDark) Color(0xFF1A1C20) else Color(0xFFE0E5EC)
+    val shadowLight = if (isDark) Color(0xFF2E3238) else Color.White
+    val shadowDark = if (isDark) Color(0xFF0F1113) else Color(0xFFA3B1C6).copy(alpha = 0.6f)
+
+    Box(
+        modifier = modifier
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                enabled = enabled,
+                onClick = onClick
+            )
+            .then(
+                if (isPressed && enabled) {
+                    Modifier.background(bg.copy(alpha = 0.9f), RoundedCornerShape(16.dp))
+                } else {
+                    Modifier.neumorphicShadow(RoundedCornerShape(16.dp), shadowLight, shadowDark, isDark)
+                        .background(bg, RoundedCornerShape(16.dp))
+                }
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            CompositionLocalProvider(
+                LocalContentColor provides if (enabled) accentColor else Color.Gray
+            ) {
+                content()
+            }
+        }
+    }
+}
+
+fun Modifier.neumorphicShadow(
+    shape: androidx.compose.ui.graphics.Shape,
+    lightShadowColor: Color,
+    darkShadowColor: Color,
+    isDark: Boolean
+) = this.drawBehind {
+    val shadowDistance = 4.dp.toPx()
+    val blurRadius = 8.dp.toPx()
+
+    drawIntoCanvas { canvas ->
+        val paint = androidx.compose.ui.graphics.Paint()
+        val frameworkPaint = paint.asFrameworkPaint()
+        
+        // Light shadow (top-left)
+        frameworkPaint.color = Color.Transparent.toArgb()
+        frameworkPaint.setShadowLayer(blurRadius, -shadowDistance, -shadowDistance, lightShadowColor.toArgb())
+        canvas.drawOutline(shape.createOutline(size, layoutDirection, this), paint)
+
+        // Dark shadow (bottom-right)
+        frameworkPaint.color = Color.Transparent.toArgb()
+        frameworkPaint.setShadowLayer(blurRadius, shadowDistance, shadowDistance, darkShadowColor.toArgb())
+        canvas.drawOutline(shape.createOutline(size, layoutDirection, this), paint)
+    }
+}
+
+@Composable
+fun SocialIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, isDark: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(44.dp)
+            .neumorphicShadow(CircleShape, if(isDark) Color(0xFF2E3238) else Color.White, if(isDark) Color(0xFF0F1113) else Color(0xFFA3B1C6).copy(alpha = 0.6f), isDark)
+            .background(if(isDark) Color(0xFF1A1C20) else Color(0xFFE0E5EC), CircleShape)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        val tintColor = if (isDark) Color(0xFFE1E2E5) else Color(0xFF44475A)
+        Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp), tint = if(isDark) Color.White.copy(alpha = 0.7f) else tintColor)
+    }
+}
+
+fun generateQrBitmap(content: String): android.graphics.Bitmap? {
+    try {
+        val size = 512
+        val hints = HashMap<com.google.zxing.EncodeHintType, Any>()
+        hints[com.google.zxing.EncodeHintType.MARGIN] = 1
+        val bitMatrix = com.google.zxing.qrcode.QRCodeWriter().encode(
+            content, com.google.zxing.BarcodeFormat.QR_CODE, size, size, hints
+        )
+        val bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.RGB_565)
+        for (x in 0 until size) {
+            for (y in 0 until size) {
+                bitmap.setPixel(x, y, if (bitMatrix.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
+            }
+        }
+        return bitmap
+    } catch (e: Exception) { return null }
 }

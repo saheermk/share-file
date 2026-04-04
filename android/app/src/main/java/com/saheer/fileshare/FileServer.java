@@ -5,6 +5,8 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /**
  * Pure-Java HTTP file server — SHTTPS clone core.
@@ -12,6 +14,14 @@ import java.util.concurrent.*;
  */
 public class FileServer {
     private static final String TAG = "FileServer";
+    public static final List<String> serverLogs = new CopyOnWriteArrayList<>();
+
+    public static void log(String msg) {
+        String time = new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date());
+        serverLogs.add("[" + time + "] " + msg);
+        if (serverLogs.size() > 2000)
+            serverLogs.remove(0);
+    }
 
     private final int port;
     private File rootDir;
@@ -123,6 +133,7 @@ public class FileServer {
 
             if (listener != null)
                 listener.onLog(method + " " + rawPath);
+            log("REQUEST: " + method + " " + rawPath);
 
             if ("GET".equalsIgnoreCase(method)) {
                 handleGet(rawOut, path, query);
@@ -154,6 +165,32 @@ public class FileServer {
             return;
         }
 
+        if (path.equals("/logs")) {
+            handleLogs(out);
+            return;
+        }
+
+        // File Operations
+        if (path.equals("/mkdir")) {
+            handleMkdir(out, query);
+            return;
+        } else if (path.equals("/delete")) {
+            handleDelete(out, query);
+            return;
+        } else if (path.equals("/rename")) {
+            handleRename(out, query);
+            return;
+        } else if (path.equals("/copy") || path.equals("/cut")) {
+            handleClipboardAction(out, path, query);
+            return;
+        } else if (path.equals("/paste")) {
+            handlePaste(out, query);
+            return;
+        } else if (path.equals("/zip")) {
+            handleZip(out, query);
+            return;
+        }
+
         // Parse ?path= param (sub-directory navigation)
         String relPath = getQueryParam(query, "path");
         if (relPath == null)
@@ -180,7 +217,8 @@ public class FileServer {
                 sendError(out, 404, "Not Found");
                 return;
             }
-            streamFile(out, f);
+            boolean forceDownload = "1".equals(getQueryParam(query, "dl"));
+            streamFile(out, f, forceDownload);
             return;
         }
 
@@ -188,9 +226,219 @@ public class FileServer {
             String html = WebInterface.buildDirListing(target, rootDir, relPath);
             sendHtml(out, html);
         } else if (target.isFile()) {
-            streamFile(out, target);
+            boolean forceDownload = "1".equals(getQueryParam(query, "dl"));
+            streamFile(out, target, forceDownload);
         } else {
             sendError(out, 404, "Not Found");
+        }
+    }
+
+    // ─── File Operations ─────────────────────────────────────────────────────
+
+    private static class Clipboard {
+        static File sourceFile = null;
+        static boolean isCut = false;
+    }
+
+    private void handleMkdir(OutputStream out, String query) throws IOException {
+        String parentPath = getQueryParam(query, "path");
+        String name = getQueryParam(query, "name");
+        if (parentPath == null)
+            parentPath = "";
+        if (name == null || name.isEmpty()) {
+            sendError(out, 400, "Name required");
+            return;
+        }
+        File parent = new File(rootDir, parentPath.startsWith("/") ? parentPath.substring(1) : parentPath);
+        File newDir = new File(parent, name);
+        if (isInsideRoot(newDir) && newDir.mkdirs()) {
+            sendRedirect(out, "/?path=" + WebInterface.urlEncode(parentPath));
+        } else {
+            sendError(out, 500, "Failed to create directory");
+        }
+    }
+
+    private void handleDelete(OutputStream out, String query) throws IOException {
+        String filePath = getQueryParam(query, "file");
+        if (filePath == null) {
+            sendError(out, 400, "File required");
+            return;
+        }
+        File f = new File(rootDir, filePath.startsWith("/") ? filePath.substring(1) : filePath);
+        if (isInsideRoot(f) && deleteRecursive(f)) {
+            File parent = f.getParentFile();
+            String parentRel = parent.getAbsolutePath().substring(rootDir.getAbsolutePath().length());
+            sendRedirect(out, "/?path=" + WebInterface.urlEncode(parentRel.isEmpty() ? "/" : parentRel));
+        } else {
+            sendError(out, 500, "Failed to delete");
+        }
+    }
+
+    private boolean deleteRecursive(File f) {
+        if (f.isDirectory()) {
+            File[] kids = f.listFiles();
+            if (kids != null)
+                for (File k : kids)
+                    deleteRecursive(k);
+        }
+        return f.delete();
+    }
+
+    private void handleRename(OutputStream out, String query) throws IOException {
+        String filePath = getQueryParam(query, "file");
+        String newName = getQueryParam(query, "new");
+        if (filePath == null || newName == null) {
+            sendError(out, 400, "Params missing");
+            return;
+        }
+        File f = new File(rootDir, filePath.startsWith("/") ? filePath.substring(1) : filePath);
+        File dest = new File(f.getParentFile(), newName);
+        if (isInsideRoot(f) && isInsideRoot(dest) && f.renameTo(dest)) {
+            File parent = f.getParentFile();
+            String parentRel = parent.getAbsolutePath().substring(rootDir.getAbsolutePath().length());
+            sendRedirect(out, "/?path=" + WebInterface.urlEncode(parentRel.isEmpty() ? "/" : parentRel));
+        } else {
+            sendError(out, 500, "Rename failed");
+        }
+    }
+
+    private void handleClipboardAction(OutputStream out, String action, String query) throws IOException {
+        String filePath = getQueryParam(query, "file");
+        if (filePath == null) {
+            sendError(out, 400, "File missing");
+            return;
+        }
+        File f = new File(rootDir, filePath.startsWith("/") ? filePath.substring(1) : filePath);
+        if (isInsideRoot(f)) {
+            Clipboard.sourceFile = f;
+            Clipboard.isCut = action.equals("/cut");
+            File parent = f.getParentFile();
+            String parentRel = parent.getAbsolutePath().substring(rootDir.getAbsolutePath().length());
+            sendRedirect(out, "/?path=" + WebInterface.urlEncode(parentRel.isEmpty() ? "/" : parentRel));
+        } else {
+            sendError(out, 403, "Forbidden");
+        }
+    }
+
+    private void handlePaste(OutputStream out, String query) throws IOException {
+        String destPath = getQueryParam(query, "to");
+        if (destPath == null)
+            destPath = "";
+        if (Clipboard.sourceFile == null) {
+            sendError(out, 400, "Nothing to paste");
+            return;
+        }
+        File destDir = new File(rootDir, destPath.startsWith("/") ? destPath.substring(1) : destPath);
+        File target = new File(destDir, Clipboard.sourceFile.getName());
+
+        if (isInsideRoot(destDir) && isInsideRoot(target)) {
+            try {
+                if (Clipboard.isCut) {
+                    if (Clipboard.sourceFile.renameTo(target)) {
+                        Clipboard.sourceFile = null;
+                    } else {
+                        throw new IOException("Move failed");
+                    }
+                } else {
+                    copyRecursive(Clipboard.sourceFile, target);
+                }
+                sendRedirect(out, "/?path=" + WebInterface.urlEncode(destPath));
+            } catch (IOException e) {
+                sendError(out, 500, "Paste failed: " + e.getMessage());
+            }
+        } else {
+            sendError(out, 403, "Forbidden");
+        }
+    }
+
+    private void handleZip(OutputStream out, String query) throws IOException {
+        String filesParam = getQueryParam(query, "files");
+        if (filesParam == null || filesParam.isEmpty()) {
+            sendError(out, 400, "Files required");
+            return;
+        }
+        String[] filePaths = filesParam.split(",");
+
+        out.write("HTTP/1.1 200 OK\r\n".getBytes("UTF-8"));
+        out.write("Content-Type: application/zip\r\n".getBytes("UTF-8"));
+        out.write("Content-Disposition: attachment; filename=\"download.zip\"\r\n".getBytes("UTF-8"));
+        out.write("Connection: close\r\n\r\n".getBytes("UTF-8"));
+        out.flush();
+
+        try (ZipOutputStream zos = new ZipOutputStream(out)) {
+            for (String p : filePaths) {
+                File f = new File(rootDir, p.startsWith("/") ? p.substring(1) : p);
+                if (isInsideRoot(f)) {
+                    zipRecursive(f, f.getName(), zos);
+                }
+            }
+        }
+    }
+
+    private void handleLogs(OutputStream out) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Server Logs</title>")
+                .append("<meta name='viewport' content='width=device-width, initial-scale=1'>")
+                .append("<style>")
+                .append("body { font-family: monospace; background: #0d1117; color: #00ff00; padding: 20px; line-height: 1.5; }")
+                .append(".btn { padding: 10px 20px; background: #21262d; color: #fff; text-decoration: none; border-radius: 8px; border: 1px solid #30363d; display: inline-block; margin-bottom: 20px; font-family: sans-serif; font-size: 14px; }")
+                .append(".log-entry { border-bottom: 1px solid #21262d; padding: 4px 0; word-wrap: break-word; }")
+                .append("</style></head><body>")
+                .append("<a href='/' class='btn'>&larr; Back to Home</a>")
+                .append("<h2><span style='color:#fff'>HTTP Server Logs</span></h2><hr style='border-color:#30363d'>");
+
+        for (int i = serverLogs.size() - 1; i >= 0; i--) {
+            sb.append("<div class='log-entry'>").append(WebInterface.escapeHtml(serverLogs.get(i))).append("</div>");
+        }
+        sb.append("</body></html>");
+        sendHtml(out, sb.toString());
+    }
+
+    private void zipRecursive(File fileToZip, String fileName, ZipOutputStream zos) throws IOException {
+        if (fileToZip.isHidden())
+            return;
+        if (fileToZip.isDirectory()) {
+            if (fileName.endsWith("/")) {
+                zos.putNextEntry(new ZipEntry(fileName));
+                zos.closeEntry();
+            } else {
+                zos.putNextEntry(new ZipEntry(fileName + "/"));
+                zos.closeEntry();
+            }
+            File[] children = fileToZip.listFiles();
+            if (children != null) {
+                for (File childFile : children) {
+                    zipRecursive(childFile, fileName + "/" + childFile.getName(), zos);
+                }
+            }
+            return;
+        }
+        try (FileInputStream fis = new FileInputStream(fileToZip)) {
+            ZipEntry zipEntry = new ZipEntry(fileName);
+            zos.putNextEntry(zipEntry);
+            byte[] bytes = new byte[65536];
+            int length;
+            while ((length = fis.read(bytes)) >= 0) {
+                zos.write(bytes, 0, length);
+            }
+        }
+    }
+
+    private void copyRecursive(File src, File dest) throws IOException {
+        if (src.isDirectory()) {
+            if (!dest.mkdirs())
+                throw new IOException("Cannot create dir: " + dest);
+            File[] kids = src.listFiles();
+            if (kids != null)
+                for (File k : kids)
+                    copyRecursive(k, new File(dest, k.getName()));
+        } else {
+            try (InputStream in = new FileInputStream(src); OutputStream out = new FileOutputStream(dest)) {
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) != -1)
+                    out.write(buf, 0, n);
+            }
         }
     }
 
@@ -282,7 +530,7 @@ public class FileServer {
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
-    private void streamFile(OutputStream out, File f) throws IOException {
+    private void streamFile(OutputStream out, File f, boolean forceDownload) throws IOException {
         String mime = URLConnection.guessContentTypeFromName(f.getName());
         if (mime == null)
             mime = "application/octet-stream";
@@ -291,9 +539,11 @@ public class FileServer {
         w.print("HTTP/1.1 200 OK\r\n");
         w.print("Content-Type: " + mime + "\r\n");
         w.print("Content-Length: " + f.length() + "\r\n");
-        w.print("Content-Disposition: attachment; filename=\"" + f.getName() + "\"\r\n");
+        String disposition = forceDownload ? "attachment" : "inline";
+        w.print("Content-Disposition: " + disposition + "; filename=\"" + f.getName() + "\"\r\n");
         w.print("Connection: close\r\n\r\n");
         w.flush();
+        log("RESPONSE: 200 OK (Streamed " + f.getName() + " as " + disposition + ")");
 
         try (FileInputStream fis = new FileInputStream(f)) {
             byte[] buf = new byte[65536];
@@ -314,6 +564,7 @@ public class FileServer {
         w.flush();
         out.write(bytes);
         out.flush();
+        log("RESPONSE: 200 OK (HTML)");
     }
 
     private void sendError(OutputStream out, int code, String msg) {
@@ -323,6 +574,7 @@ public class FileServer {
             w.print("Content-Type: text/plain\r\nConnection: close\r\n\r\n");
             w.print(msg);
             w.flush();
+            log("RESPONSE: " + code + " " + msg);
         } catch (Exception ignored) {
         }
     }
@@ -334,6 +586,7 @@ public class FileServer {
             w.print("Location: " + location + "\r\n");
             w.print("Connection: close\r\n\r\n");
             w.flush();
+            log("RESPONSE: 302 Redirect to " + location);
         } catch (Exception ignored) {
         }
     }
