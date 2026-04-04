@@ -1,0 +1,10 @@
+#!/bin/sh
+# Minimal Gradle wrapper launcher
+APP_HOME=$(dirname "$0")
+JAVA_OPTS="-Xmx2048m -XX:MaxMetaspaceSize=512m"
+GRADLE_DIST="$HOME/.gradle/wrapper/dists/gradle-8.5-bin"
+GRADLE_HOME=$(find "$GRADLE_DIST" -name "gradle-8.5" -maxdepth 3 -type d 2>/dev/null | head -1)
+if [ -z "$GRADLE_HOME" ]; then
+  echo "ERROR: Gradle 8.5 not found in cache"; exit 1
+fi
+exec java $JAVA_OPTS -cp "$GRADLE_HOME/lib/gradle-launcher-8.5.jar" org.gradle.launcher.GradleMain "$@"
