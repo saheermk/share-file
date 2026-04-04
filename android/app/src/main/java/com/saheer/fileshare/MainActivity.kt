@@ -40,6 +40,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.io.File
+import android.widget.Toast
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
+import androidx.activity.compose.rememberLauncherForActivityResult
 
 class MainActivity : ComponentActivity() {
 
@@ -85,6 +89,17 @@ class MainActivity : ComponentActivity() {
         val logs = remember { mutableStateListOf<String>() }
         var showFolderPicker by remember { mutableStateOf(false) }
         var showQr by remember { mutableStateOf(false) }
+
+        val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+            if (result.contents != null) {
+                if (result.contents.startsWith("http://") || result.contents.startsWith("https://")) {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(result.contents)))
+                    logs.add("Opened: ${result.contents}")
+                } else {
+                    Toast.makeText(context, "Invalid QR content", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
 
         LaunchedEffect(Unit) {
             hasPermission = checkAllFilesAccess()
@@ -290,6 +305,39 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
+
+                        // ─── Scan to Connect ──────────────────────────────────────────────
+                        item {
+                            NeumorphicCard(isDark = isDark) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("CONNECT", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
+                                        Text("Scan QR from a device", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextColor)
+                                    }
+                                    NeumorphicButton(
+                                        onClick = {
+                                            scanLauncher.launch(ScanOptions().apply {
+                                                setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                                setPrompt("Scan QR Code to Connect")
+                                                setBeepEnabled(false)
+                                                setOrientationLocked(false)
+                                            })
+                                        },
+                                        modifier = Modifier.width(120.dp),
+                                        accentColor = Blue,
+                                        isDark = isDark
+                                    ) {
+                                        Icon(Icons.Default.QrCodeScanner, null, Modifier.size(18.dp))
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Scan", fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+
 
                         // ─── Activity Log ─────────────────────────────────────────────────
                         item {
