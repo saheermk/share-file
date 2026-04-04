@@ -8,8 +8,6 @@ Built from the ground up using pure native Android technologies (Jetpack Compose
 
 ---
 
-## Features
-
 | Feature                   | Description                                       |
 | ------------------------- | ------------------------------------------------- |
 | **Custom Folder Picker**  | In-app filesystem browser — no system picker      |
@@ -17,10 +15,19 @@ Built from the ground up using pure native Android technologies (Jetpack Compose
 | **File Download**         | Direct download with size and date info           |
 | **File Upload**           | Upload files from the browser to any folder       |
 | **Configurable Port**     | Set any port, remembered across restarts          |
-| **QR Code**               | Scan to open the server URL instantly             |
-| **Copy & Share URL**      | One-tap copy or share via any app                 |
+| **QR Code Generator**     | Scan to open the server URL instantly             |
+| **QR Code Scanner**       | Built-in scanner to connect to other devices      |
+| **Keep-Alive Service**    | Server stays running when app is in background    |
 | **Activity Log**          | Real-time log of all server requests              |
 | **Full Storage Access**   | `MANAGE_EXTERNAL_STORAGE` — share any folder      |
+| **Modern Dark Mode**      | Refined neumorphic UI, automatically themed       |
+
+---
+
+## Contributing
+
+If you want to contribute to this project, visit the official repository:
+[https://github.com/saheermk/share-file](https://github.com/saheermk/share-file)
 
 ---
 

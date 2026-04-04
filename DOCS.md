@@ -67,7 +67,14 @@ This is a **pure native Android** app. No services, no NDK, no third-party HTTP 
 - Single Activity, single Composable (`ShttsApp`).
 - Permission check on every `onResume` via `Environment.isExternalStorageManager()`.
 - QR code generated from URL using **ZXing Core** (no ZXing UI dependency).
+- **QR Code Scanner**: Integrated with `com.journeyapps:zxing-android-embedded` to allow connecting to other network servers via URL detection.
 - Port and root path persisted to `SharedPreferences`.
+
+### `KeepAliveService.kt`
+
+- **Foreground Service**: Ensures the HTTP server remains active even when the app is backgrounded or the screen is off.
+- **Wakelocks**: Holds a `PowerManager.PARTIAL_WAKE_LOCK` and `WifiManager.WIFI_MODE_FULL_HIGH_PERF` to prevent the system from suspending the CPU and network stack during file transfers.
+- **Lifecycle**: Automatically started and bound to the "Start Server" toggle in `MainActivity.kt`.
 
 ---
 
@@ -90,6 +97,7 @@ This is a **pure native Android** app. No services, no NDK, no third-party HTTP 
 | `androidx.compose.material3:material3`              | BOM          | Material Design 3         |
 | `androidx.compose.material:material-icons-extended` | BOM          | All Material icons        |
 | `com.google.zxing:core`                             | `3.5.2`      | QR code bitmap generation |
+| `com.journeyapps:zxing-android-embedded`            | `4.3.0`      | QR code native scanning   |
 | `androidx.documentfile:documentfile`                | `1.0.1`      | Optional file abstraction |
 
 ---
