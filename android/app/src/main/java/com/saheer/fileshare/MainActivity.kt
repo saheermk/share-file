@@ -44,6 +44,8 @@ import android.widget.Toast
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.ui.res.vectorResource
+import androidx.compose.ui.graphics.vector.ImageVector
 
 class MainActivity : ComponentActivity() {
 
@@ -278,6 +280,7 @@ class MainActivity : ComponentActivity() {
                                             isRunning = false
                                             serverUrl = ""
                                             logs.add("Stopped server")
+                                            context.stopService(Intent(context, KeepAliveService::class.java))
                                         } else {
                                             val p = port.toIntOrNull() ?: 8080
                                             val listener = object : FileServer.OnServerListener {
@@ -293,6 +296,13 @@ class MainActivity : ComponentActivity() {
                                             fileServer = FileServer(p, selectedRoot, listener)
                                             fileServer?.start()
                                             prefs.edit().putInt("port", p).apply()
+                                            
+                                            val serviceIntent = Intent(context, KeepAliveService::class.java)
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                                context.startForegroundService(serviceIntent)
+                                            } else {
+                                                context.startService(serviceIntent)
+                                            }
                                         }
                                     },
                                     modifier = Modifier.fillMaxWidth().height(56.dp),
@@ -373,12 +383,22 @@ class MainActivity : ComponentActivity() {
                                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://saheermk.pages.dev")))
                             }
                         )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Open Source on GitHub",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Blue,
+                            modifier = Modifier.clickable {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/saheermk/share-file")))
+                            }
+                        )
                         Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                            SocialIcon(Icons.Default.Public, isDark = isDark) {
+                            SocialIcon(ImageVector.vectorResource(id = R.drawable.ic_github), isDark = isDark) {
                                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/saheermk/")))
                             }
-                            SocialIcon(Icons.Default.Share, isDark = isDark) {
+                            SocialIcon(ImageVector.vectorResource(id = R.drawable.ic_linkedin), isDark = isDark) {
                                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://in.linkedin.com/in/saheermk")))
                             }
                         }
