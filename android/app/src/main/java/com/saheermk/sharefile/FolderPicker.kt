@@ -1,4 +1,4 @@
-package com.saheer.fileshare
+package com.saheermk.sharefile
 
 import android.graphics.Bitmap
 import android.graphics.Color as GColor

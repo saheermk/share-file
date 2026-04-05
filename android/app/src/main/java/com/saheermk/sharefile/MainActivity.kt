@@ -1,4 +1,4 @@
-package com.saheer.fileshare
+package com.saheermk.sharefile
 
 import android.content.Intent
 import android.net.Uri

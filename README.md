@@ -95,7 +95,7 @@ android/
 │   ├── build.gradle                  # Dependencies (ZXing, Compose, Material3)
 │   └── src/main/
 │       ├── AndroidManifest.xml       # Permissions + Activity
-│       └── java/com/saheer/fileshare/
+│       └── java/com/saheermk/sharefile/
 │           ├── MainActivity.kt       # Main UI — server control, QR, logs
 │           ├── FolderPicker.kt       # Custom in-app folder browser
 │           ├── FileServer.java       # HTTP server engine
