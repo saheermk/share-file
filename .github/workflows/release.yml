@@ -11,9 +11,18 @@ on:
 permissions:
   contents: write
 
+# Opt-in to Node 24 to fix the Node 20 deprecation warnings
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    
+    # Set the default working directory for all 'run' commands to 'android'
+    defaults:
+      run:
+        working-directory: ./android
 
     steps:
       - name: Checkout repository
@@ -39,13 +48,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: NoSleep-Debug-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          # Actions (uses) don't respect 'working-directory', so we add the 'android/' prefix here
+          path: android/app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload Release APK as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: NoSleep-Release-Unsigned-APK
-          path: app/build/outputs/apk/release/app-release-unsigned.apk
+          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
 
       # Automatically publish a GitHub Release when a tag (e.g., 'v1.0.0') is pushed
       - name: Create GitHub Release
@@ -53,8 +63,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            app/build/outputs/apk/debug/app-debug.apk
-            app/build/outputs/apk/release/app-release-unsigned.apk
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/release/app-release-unsigned.apk
           name: Release ${{ github.ref_name }}
           generate_release_notes: true
         env:
