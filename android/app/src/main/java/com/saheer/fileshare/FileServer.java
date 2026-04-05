@@ -543,14 +543,16 @@ public class FileServer {
         if (mime == null)
             mime = "application/octet-stream";
 
-        PrintWriter w = new PrintWriter(out);
-        w.print("HTTP/1.1 200 OK\r\n");
-        w.print("Content-Type: " + mime + "\r\n");
-        w.print("Content-Length: " + f.length() + "\r\n");
         String disposition = forceDownload ? "attachment" : "inline";
-        w.print("Content-Disposition: " + disposition + "; filename=\"" + f.getName() + "\"\r\n");
-        w.print("Connection: close\r\n\r\n");
-        w.flush();
+        StringBuilder sb = new StringBuilder();
+        sb.append("HTTP/1.1 200 OK\r\n")
+                .append("Content-Type: ").append(mime).append("\r\n")
+                .append("Content-Length: ").append(f.length()).append("\r\n")
+                .append("Content-Disposition: ").append(disposition).append("; filename=\"").append(f.getName())
+                .append("\"\r\n")
+                .append("Connection: close\r\n\r\n");
+
+        out.write(sb.toString().getBytes("UTF-8"));
         log("RESPONSE: 200 OK (Streamed " + f.getName() + " as " + disposition + ")");
 
         try (FileInputStream fis = new FileInputStream(f)) {
@@ -564,12 +566,11 @@ public class FileServer {
 
     private void sendHtml(OutputStream out, String html) throws IOException {
         byte[] bytes = html.getBytes("UTF-8");
-        PrintWriter w = new PrintWriter(out);
-        w.print("HTTP/1.1 200 OK\r\n");
-        w.print("Content-Type: text/html; charset=UTF-8\r\n");
-        w.print("Content-Length: " + bytes.length + "\r\n");
-        w.print("Connection: close\r\n\r\n");
-        w.flush();
+        String header = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: text/html; charset=UTF-8\r\n" +
+                "Content-Length: " + bytes.length + "\r\n" +
+                "Connection: close\r\n\r\n";
+        out.write(header.getBytes("UTF-8"));
         out.write(bytes);
         out.flush();
         log("RESPONSE: 200 OK (HTML)");
@@ -577,11 +578,13 @@ public class FileServer {
 
     private void sendError(OutputStream out, int code, String msg) {
         try {
-            PrintWriter w = new PrintWriter(out);
-            w.print("HTTP/1.1 " + code + " " + msg + "\r\n");
-            w.print("Content-Type: text/plain\r\nConnection: close\r\n\r\n");
-            w.print(msg);
-            w.flush();
+            String resp = "HTTP/1.1 " + code + " " + msg + "\r\n" +
+                    "Content-Type: text/plain\r\n" +
+                    "Content-Length: " + msg.length() + "\r\n" +
+                    "Connection: close\r\n\r\n" +
+                    msg;
+            out.write(resp.getBytes("UTF-8"));
+            out.flush();
             log("RESPONSE: " + code + " " + msg);
         } catch (Exception ignored) {
         }
@@ -589,11 +592,12 @@ public class FileServer {
 
     private void sendRedirect(OutputStream out, String location) {
         try {
-            PrintWriter w = new PrintWriter(out);
-            w.print("HTTP/1.1 302 Found\r\n");
-            w.print("Location: " + location + "\r\n");
-            w.print("Connection: close\r\n\r\n");
-            w.flush();
+            String resp = "HTTP/1.1 302 Found\r\n" +
+                    "Location: " + location + "\r\n" +
+                    "Content-Length: 0\r\n" +
+                    "Connection: close\r\n\r\n";
+            out.write(resp.getBytes("UTF-8"));
+            out.flush();
             log("RESPONSE: 302 Redirect to " + location);
         } catch (Exception ignored) {
         }
