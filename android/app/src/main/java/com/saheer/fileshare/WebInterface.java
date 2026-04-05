@@ -256,7 +256,7 @@ public class WebInterface {
                 .append("<meta name='viewport' content='width=device-width, initial-scale=1'>")
                 .append("<link rel='icon' type='image/png' href='").append(APP_LOGO).append("'>")
                 .append("<link href='/assets/inter.css' rel='stylesheet'>")
-                .append("<link rel='stylesheet' href='/assets/all.min.css'>")
+                .append("<link rel='stylesheet' href='/assets/lib/all.min.css'>")
                 .append("<script src='/assets/sweetalert2.min.js'></script>")
                 .append("<title>Share File | ").append(escapeHtml(displayPath)).append("</title>")
                 .append(CSS).append(JS)
