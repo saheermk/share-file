@@ -174,7 +174,7 @@ public class WebInterface {
             "function itemClick(e, el, path, isDir, encodedPath) {" +
             "  e.preventDefault();" +
             "  if(selectMode) { toggleSelect(el, path); return; }" +
-            "  location.href = isDir ? '/?path=' + encodedPath : '/download?file=' + encodedPath + '&dl=1';" +
+            "  location.href = isDir ? '/?path=' + encodedPath : '/download?file=' + encodedPath;" +
             "}" +
             "function toggleSelectMode() {" +
             "  selectMode = !selectMode;" +
