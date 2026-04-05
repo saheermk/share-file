@@ -1,6 +1,13 @@
 package com.saheer.fileshare;
 
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
 import android.util.Log;
 import java.io.*;
 import java.net.*;
@@ -167,7 +174,6 @@ public class FileServer {
             return;
         }
 
-        // /favicon.ico — ignore
         if (path.equals("/favicon.ico")) {
             sendError(out, 404, "Not Found");
             return;
@@ -178,7 +184,28 @@ public class FileServer {
             return;
         }
 
-        // File Operations
+        // --- New Routing ---
+        if (path.equals("/")) {
+            sendHtml(out, WebInterface.buildLandingPage());
+            return;
+        }
+
+        if (path.equals("/apps")) {
+            sendHtml(out, WebInterface.buildAppsListing(getInstalledApps()));
+            return;
+        }
+
+        if (path.equals("/download_app")) {
+            handleAppDownload(out, query);
+            return;
+        }
+
+        if (path.equals("/app_icon")) {
+            handleAppIcon(out, query);
+            return;
+        }
+
+        // --- File Operations ---
         if (path.equals("/mkdir")) {
             handleMkdir(out, query);
             return;
@@ -199,46 +226,34 @@ public class FileServer {
             return;
         }
 
-        // Parse ?path= param (sub-directory navigation)
-        String relPath = getQueryParam(query, "path");
-        if (relPath == null)
-            relPath = "";
-        // Remove leading slash
-        if (relPath.startsWith("/"))
-            relPath = relPath.substring(1);
+        // --- File Manager ---
+        if (path.equals("/files") || path.equals("/download")) {
+            String relPath = getQueryParam(query, "path");
+            if (relPath == null)
+                relPath = getQueryParam(query, "file"); // fallback for legacy /download
+            if (relPath == null)
+                relPath = "";
+            if (relPath.startsWith("/"))
+                relPath = relPath.substring(1);
 
-        File target = relPath.isEmpty() ? rootDir : new File(rootDir, relPath);
-
-        // Security: ensure inside rootDir
-        if (!isInsideRoot(target)) {
-            sendError(out, 403, "Forbidden");
-            return;
-        }
-
-        // Download file
-        String filePath = getQueryParam(query, "file");
-        if (filePath != null) {
-            if (filePath.startsWith("/"))
-                filePath = filePath.substring(1);
-            File f = new File(rootDir, filePath);
-            if (!isInsideRoot(f) || !f.isFile()) {
-                sendError(out, 404, "Not Found");
+            File target = relPath.isEmpty() ? rootDir : new File(rootDir, relPath);
+            if (!isInsideRoot(target)) {
+                sendError(out, 403, "Forbidden");
                 return;
             }
-            boolean forceDownload = "1".equals(getQueryParam(query, "dl"));
-            streamFile(out, f, forceDownload);
+
+            if (target.isDirectory() && path.equals("/files")) {
+                sendHtml(out, WebInterface.buildDirListing(target, rootDir, relPath));
+            } else if (target.isFile()) {
+                boolean forceDownload = "1".equals(getQueryParam(query, "dl"));
+                streamFile(out, target, forceDownload);
+            } else {
+                sendError(out, 404, "Not Found");
+            }
             return;
         }
 
-        if (target.isDirectory()) {
-            String html = WebInterface.buildDirListing(target, rootDir, relPath);
-            sendHtml(out, html);
-        } else if (target.isFile()) {
-            boolean forceDownload = "1".equals(getQueryParam(query, "dl"));
-            streamFile(out, target, forceDownload);
-        } else {
-            sendError(out, 404, "Not Found");
-        }
+        sendError(out, 404, "Not Found");
     }
 
     // ─── File Operations ─────────────────────────────────────────────────────
@@ -260,7 +275,7 @@ public class FileServer {
         File parent = new File(rootDir, parentPath.startsWith("/") ? parentPath.substring(1) : parentPath);
         File newDir = new File(parent, name);
         if (isInsideRoot(newDir) && newDir.mkdirs()) {
-            sendRedirect(out, "/?path=" + WebInterface.urlEncode(parentPath));
+            sendRedirect(out, "/files?path=" + WebInterface.urlEncode(parentPath));
         } else {
             sendError(out, 500, "Failed to create directory");
         }
@@ -276,7 +291,7 @@ public class FileServer {
         if (isInsideRoot(f) && deleteRecursive(f)) {
             File parent = f.getParentFile();
             String parentRel = parent.getAbsolutePath().substring(rootDir.getAbsolutePath().length());
-            sendRedirect(out, "/?path=" + WebInterface.urlEncode(parentRel.isEmpty() ? "/" : parentRel));
+            sendRedirect(out, "/files?path=" + WebInterface.urlEncode(parentRel.isEmpty() ? "/" : parentRel));
         } else {
             sendError(out, 500, "Failed to delete");
         }
@@ -304,7 +319,7 @@ public class FileServer {
         if (isInsideRoot(f) && isInsideRoot(dest) && f.renameTo(dest)) {
             File parent = f.getParentFile();
             String parentRel = parent.getAbsolutePath().substring(rootDir.getAbsolutePath().length());
-            sendRedirect(out, "/?path=" + WebInterface.urlEncode(parentRel.isEmpty() ? "/" : parentRel));
+            sendRedirect(out, "/files?path=" + WebInterface.urlEncode(parentRel.isEmpty() ? "/" : parentRel));
         } else {
             sendError(out, 500, "Rename failed");
         }
@@ -322,7 +337,7 @@ public class FileServer {
             Clipboard.isCut = action.equals("/cut");
             File parent = f.getParentFile();
             String parentRel = parent.getAbsolutePath().substring(rootDir.getAbsolutePath().length());
-            sendRedirect(out, "/?path=" + WebInterface.urlEncode(parentRel.isEmpty() ? "/" : parentRel));
+            sendRedirect(out, "/files?path=" + WebInterface.urlEncode(parentRel.isEmpty() ? "/" : parentRel));
         } else {
             sendError(out, 403, "Forbidden");
         }
@@ -350,7 +365,7 @@ public class FileServer {
                 } else {
                     copyRecursive(Clipboard.sourceFile, target);
                 }
-                sendRedirect(out, "/?path=" + WebInterface.urlEncode(destPath));
+                sendRedirect(out, "/files?path=" + WebInterface.urlEncode(destPath));
             } catch (IOException e) {
                 sendError(out, 500, "Paste failed: " + e.getMessage());
             }
@@ -532,7 +547,7 @@ public class FileServer {
             listener.onLog("Uploaded: " + filename + " (" + (bodyDataEnd - bodyDataStart) + " bytes)");
 
         // Redirect back to folder
-        String redirect = "/?path=" + (relPath.isEmpty() ? "" : "/" + relPath);
+        String redirect = "/files?path=" + (relPath.isEmpty() ? "" : "/" + relPath);
         sendRedirect(out, redirect);
     }
 
@@ -690,5 +705,89 @@ public class FileServer {
         } catch (SocketException ignored) {
         }
         return "127.0.0.1";
+    }
+
+    public static class AppItem {
+        public String name;
+        public String packageName;
+        public long size;
+        public String apkPath;
+    }
+
+    private List<AppItem> getInstalledApps() {
+        List<AppItem> list = new ArrayList<>();
+        PackageManager pm = context.getPackageManager();
+        List<ApplicationInfo> apps = pm.getInstalledApplications(0);
+        for (ApplicationInfo app : apps) {
+            // Only show apps that have a launcher intent (user-facing)
+            if (pm.getLaunchIntentForPackage(app.packageName) == null)
+                continue;
+            AppItem item = new AppItem();
+            item.name = app.loadLabel(pm).toString();
+            item.packageName = app.packageName;
+            item.apkPath = app.sourceDir;
+            item.size = new File(app.sourceDir).length();
+            list.add(item);
+        }
+        Collections.sort(list, (a, b) -> a.name.compareToIgnoreCase(b.name));
+        return list;
+    }
+
+    private void handleAppDownload(OutputStream out, String query) throws IOException {
+        String pkg = getQueryParam(query, "pkg");
+        if (pkg == null) {
+            sendError(out, 400, "Missing package name");
+            return;
+        }
+        try {
+            PackageManager pm = context.getPackageManager();
+            ApplicationInfo app = pm.getApplicationInfo(pkg, 0);
+            File apkFile = new File(app.sourceDir);
+            if (apkFile.exists()) {
+                streamFile(out, apkFile, true);
+            } else {
+                sendError(out, 404, "APK not found");
+            }
+        } catch (PackageManager.NameNotFoundException e) {
+            sendError(out, 404, "App not found");
+        }
+    }
+
+    private void handleAppIcon(OutputStream out, String query) throws IOException {
+        String pkg = getQueryParam(query, "pkg");
+        if (pkg == null) {
+            sendError(out, 400, "Missing package name");
+            return;
+        }
+        try {
+            PackageManager pm = context.getPackageManager();
+            Drawable icon = pm.getApplicationIcon(pkg);
+            Bitmap bitmap;
+            if (icon instanceof BitmapDrawable) {
+                bitmap = ((BitmapDrawable) icon).getBitmap();
+            } else {
+                int w = icon.getIntrinsicWidth() > 0 ? icon.getIntrinsicWidth() : 128;
+                int h = icon.getIntrinsicHeight() > 0 ? icon.getIntrinsicHeight() : 128;
+                bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                Canvas canvas = new Canvas(bitmap);
+                icon.setBounds(0, 0, canvas.getWidth(), canvas.getHeight());
+                icon.draw(canvas);
+            }
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos);
+            byte[] bytes = baos.toByteArray();
+
+            PrintWriter w = new PrintWriter(out);
+            w.print("HTTP/1.1 200 OK\r\n");
+            w.print("Content-Type: image/png\r\n");
+            w.print("Content-Length: " + bytes.length + "\r\n");
+            w.print("Cache-Control: public, max-age=86400\r\n");
+            w.print("Connection: close\r\n\r\n");
+            w.flush();
+            out.write(bytes);
+            out.flush();
+        } catch (Exception e) {
+            sendError(out, 404, "Icon not found");
+        }
     }
 }
