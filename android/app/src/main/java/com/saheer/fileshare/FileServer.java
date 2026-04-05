@@ -1,5 +1,6 @@
 package com.saheer.fileshare;
 
+import android.content.Context;
 import android.util.Log;
 import java.io.*;
 import java.net.*;
@@ -24,6 +25,7 @@ public class FileServer {
     }
 
     private final int port;
+    private final Context context;
     private File rootDir;
     private final OnServerListener listener;
     private ServerSocket serverSocket;
@@ -40,9 +42,10 @@ public class FileServer {
         void onLog(String msg);
     }
 
-    public FileServer(int port, File rootDir, OnServerListener listener) {
+    public FileServer(int port, File rootDir, Context context, OnServerListener listener) {
         this.port = port;
         this.rootDir = rootDir;
+        this.context = context;
         this.listener = listener;
     }
 
@@ -159,6 +162,11 @@ public class FileServer {
     // ─── GET Handler ────────────────────────────────────────────────────────
 
     private void handleGet(OutputStream out, String path, String query) throws IOException {
+        if (path.startsWith("/assets/")) {
+            serveAsset(out, path.substring(8));
+            return;
+        }
+
         // /favicon.ico — ignore
         if (path.equals("/favicon.ico")) {
             sendError(out, 404, "Not Found");
@@ -625,6 +633,44 @@ public class FileServer {
                 sb.append((char) b);
         }
         return sb.toString();
+    }
+
+    private void serveAsset(OutputStream out, String assetPath) throws IOException {
+        String fullPath = "web/" + assetPath;
+        try (InputStream is = context.getAssets().open(fullPath)) {
+            byte[] buffer = new byte[8192];
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            int n;
+            while ((n = is.read(buffer)) != -1)
+                baos.write(buffer, 0, n);
+            byte[] bytes = baos.toByteArray();
+
+            String mime = URLConnection.guessContentTypeFromName(assetPath);
+            if (mime == null) {
+                if (assetPath.endsWith(".css"))
+                    mime = "text/css";
+                else if (assetPath.endsWith(".js"))
+                    mime = "application/javascript";
+                else if (assetPath.endsWith(".woff2"))
+                    mime = "font/woff2";
+                else if (assetPath.endsWith(".ttf"))
+                    mime = "font/ttf";
+                else
+                    mime = "application/octet-stream";
+            }
+
+            PrintWriter w = new PrintWriter(out);
+            w.print("HTTP/1.1 200 OK\r\n");
+            w.print("Content-Type: " + mime + "\r\n");
+            w.print("Content-Length: " + bytes.length + "\r\n");
+            w.print("Connection: close\r\n\r\n");
+            w.flush();
+            out.write(bytes);
+            out.flush();
+            log("ASSET: " + assetPath + " (" + bytes.length + " bytes)");
+        } catch (IOException e) {
+            sendError(out, 404, "Asset Not Found: " + assetPath);
+        }
     }
 
     public static String getLocalIp() {

@@ -293,7 +293,7 @@ class MainActivity : ComponentActivity() {
                                                 override fun onError(msg: String) { logs.add("ERR: $msg") }
                                                 override fun onLog(msg: String) { logs.add(msg) }
                                             }
-                                            fileServer = FileServer(p, selectedRoot, listener)
+                                            fileServer = FileServer(p, selectedRoot, context, listener)
                                             fileServer?.start()
                                             prefs.edit().putInt("port", p).apply()
                                             
