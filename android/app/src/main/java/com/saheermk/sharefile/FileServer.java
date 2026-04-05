@@ -174,10 +174,14 @@ public class FileServer {
 
             // Special route: login
             if (path.equals("/login")) {
-                if ("POST".equalsIgnoreCase(method)) {
+                if ("GET".equals(method)) {
+                    if (authenticated) {
+                        sendRedirect(rawOut, "/");
+                        return;
+                    }
+                    sendHtml(rawOut, WebInterface.buildLoginPage(null));
+                } else if ("POST".equals(method)) {
                     handleLoginPost(rawOut, headers, rawIn);
-                } else {
-                    sendHtml(rawOut, WebInterface.buildLoginPage(""));
                 }
                 return;
             }
