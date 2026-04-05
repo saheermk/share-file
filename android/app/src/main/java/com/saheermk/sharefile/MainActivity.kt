@@ -46,6 +46,10 @@ import com.journeyapps.barcodescanner.ScanOptions
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.graphics.vector.ImageVector
+import java.net.InetAddress
+import java.net.NetworkInterface
+import java.util.*
+import kotlin.collections.ArrayList
 
 class MainActivity : ComponentActivity() {
 
@@ -92,6 +96,15 @@ class MainActivity : ComponentActivity() {
         var showFolderPicker by remember { mutableStateOf(false) }
         var showQr by remember { mutableStateOf(false) }
 
+        // Advanced Settings States
+        var enablePassword by remember { mutableStateOf(prefs.getBoolean("enable_password", false)) }
+        var passwordValue by remember { mutableStateOf(prefs.getString("server_password", "")!!) }
+        var passwordVisible by remember { mutableStateOf(false) }
+        var allowModifications by remember { mutableStateOf(prefs.getBoolean("allow_modifications", true)) }
+        var allowPreviews by remember { mutableStateOf(prefs.getBoolean("allow_previews", true)) }
+        var selectedInterface by remember { mutableStateOf(prefs.getString("selected_interface", "0.0.0.0")!!) }
+        val interfaces = remember { mutableStateListOf<Pair<String, String>>() } // Name to IP
+
         val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
             if (result.contents != null) {
                 if (result.contents.startsWith("http://") || result.contents.startsWith("https://")) {
@@ -105,6 +118,22 @@ class MainActivity : ComponentActivity() {
 
         LaunchedEffect(Unit) {
             hasPermission = checkAllFilesAccess()
+            
+            // Discover Interfaces
+            interfaces.clear()
+            interfaces.add("All Interfaces" to "0.0.0.0")
+            try {
+                val nets = NetworkInterface.getNetworkInterfaces()
+                for (netint in Collections.list(nets)) {
+                    if (!netint.isUp) continue
+                    val addrs = netint.inetAddresses
+                    for (inetAddress in Collections.list(addrs)) {
+                        if (inetAddress is java.net.Inet4Address) {
+                            interfaces.add("${netint.displayName}" to inetAddress.hostAddress)
+                        }
+                    }
+                }
+            } catch (e: Exception) { logs.add("Iface Discovery Error: ${e.message}") }
         }
 
         MaterialTheme {
@@ -130,20 +159,44 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                         
-                        // Theme Toggle
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.CenterEnd)
-                                .size(44.dp)
-                                .neumorphicShadow(CircleShape, if(isDark) Color(0xFF2E3238) else Color.White, if(isDark) Color(0xFF0F1113) else Color(0xFFA3B1C6).copy(alpha = 0.6f), isDark)
-                                .background(BgColor, CircleShape)
-                                .clickable { 
-                                    manualDarkTheme = !isDark 
-                                    prefs.edit().putBoolean("is_dark", !isDark).apply()
-                                },
-                            contentAlignment = Alignment.Center
+                        Row(
+                            modifier = Modifier.align(Alignment.CenterEnd),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(if (isDark) "☀️" else "🌙", fontSize = 18.sp)
+                            // Scan Button
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .neumorphicShadow(CircleShape, if(isDark) Color(0xFF2E3238) else Color.White, if(isDark) Color(0xFF0F1113) else Color(0xFFA3B1C6).copy(alpha = 0.6f), isDark)
+                                    .background(BgColor, CircleShape)
+                                    .clickable { 
+                                        scanLauncher.launch(ScanOptions().apply {
+                                            setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                            setPrompt("Scan QR Code to Connect")
+                                            setBeepEnabled(false)
+                                            setOrientationLocked(false)
+                                        })
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.QrCodeScanner, null, tint = Blue, modifier = Modifier.size(20.dp))
+                            }
+
+                            // Theme Toggle
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .neumorphicShadow(CircleShape, if(isDark) Color(0xFF2E3238) else Color.White, if(isDark) Color(0xFF0F1113) else Color(0xFFA3B1C6).copy(alpha = 0.6f), isDark)
+                                    .background(BgColor, CircleShape)
+                                    .clickable { 
+                                        manualDarkTheme = !isDark 
+                                        prefs.edit().putBoolean("is_dark", !isDark).apply()
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(if (isDark) "☀️" else "🌙", fontSize = 18.sp)
+                            }
                         }
                     }
 
@@ -294,6 +347,9 @@ class MainActivity : ComponentActivity() {
                                                 override fun onLog(msg: String) { logs.add(msg) }
                                             }
                                             fileServer = FileServer(p, selectedRoot, context, listener)
+                                            fileServer?.setSecurity(enablePassword, passwordValue)
+                                            fileServer?.setToggles(allowModifications, allowPreviews)
+                                            fileServer?.setInterface(selectedInterface)
                                             fileServer?.start()
                                             prefs.edit().putInt("port", p).apply()
                                             
@@ -316,34 +372,152 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        // ─── Scan to Connect ──────────────────────────────────────────────
+                        // ─── Network Interface (Reordered here) ───────────────────────────
                         item {
                             NeumorphicCard(isDark = isDark) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text("CONNECT", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
-                                        Text("Scan QR from a device", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextColor)
-                                    }
-                                    NeumorphicButton(
-                                        onClick = {
-                                            scanLauncher.launch(ScanOptions().apply {
-                                                setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                                                setPrompt("Scan QR Code to Connect")
-                                                setBeepEnabled(false)
-                                                setOrientationLocked(false)
-                                            })
-                                        },
-                                        modifier = Modifier.width(120.dp),
-                                        accentColor = Blue,
-                                        isDark = isDark
+                                Text("NETWORK INTERFACE", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
+                                Spacer(Modifier.height(12.dp))
+                                
+                                var expanded by remember { mutableStateOf(false) }
+                                Box(modifier = Modifier.fillMaxWidth().wrapContentSize(Alignment.TopStart)) {
+                                    OutlinedButton(
+                                        onClick = { if (!isRunning) expanded = true },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Blue, disabledContentColor = Blue.copy(alpha = 0.7f)),
+                                        enabled = !isRunning
                                     ) {
-                                        Icon(Icons.Default.QrCodeScanner, null, Modifier.size(18.dp))
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("Scan", fontWeight = FontWeight.Bold)
+                                        val currentLabel = interfaces.find { it.second == selectedInterface }?.first ?: "Custom"
+                                        Text("${currentLabel} (${selectedInterface})", fontSize = 13.sp)
+                                        Spacer(Modifier.weight(1f))
+                                        Icon(Icons.Default.ArrowDropDown, null)
                                     }
+                                    DropdownMenu(
+                                        expanded = expanded,
+                                        onDismissRequest = { expanded = false },
+                                        modifier = Modifier.background(if (isDark) Color(0xFF25282D) else Color.White)
+                                    ) {
+                                        interfaces.forEach { (name, ip) ->
+                                            val isSelected = selectedInterface == ip
+                                            DropdownMenuItem(
+                                                text = { 
+                                                    Text(
+                                                        "$name ($ip)", 
+                                                        color = if (isSelected) Blue else TextColor,
+                                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                                    ) 
+                                                },
+                                                onClick = {
+                                                    selectedInterface = ip
+                                                    prefs.edit().putString("selected_interface", ip).apply()
+                                                    expanded = false
+                                                },
+                                                modifier = Modifier.background(if (isSelected && isDark) Color.White.copy(alpha = 0.05f) else Color.Transparent)
+                                            )
+                                        }
+                                    }
+                                }
+                                if (isRunning) {
+                                    Text("Stop server to change interface", fontSize = 10.sp, color = Red.copy(alpha = 0.7f), modifier = Modifier.padding(top = 4.dp))
+                                }
+                            }
+                        }
+
+                        // ─── Security & Settings ──────────────────────────────────────────
+                        item {
+                            val cardBg = if (isDark) Color(0xFF1E2126) else BgColor
+                            NeumorphicCard(isDark = isDark, bgColor = cardBg) {
+                                Text("SECURITY & SETTINGS", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
+                                Spacer(Modifier.height(16.dp))
+                                
+                                // Password Toggle
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Password Protection", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextColor)
+                                        Text("Ask for password to access files", fontSize = 11.sp, color = TextColor.copy(alpha = 0.6f))
+                                    }
+                                    Switch(
+                                        checked = enablePassword,
+                                        onCheckedChange = { 
+                                            enablePassword = it
+                                            prefs.edit().putBoolean("enable_password", it).apply()
+                                            if (isRunning) fileServer?.setSecurity(it, passwordValue)
+                                        },
+                                        colors = SwitchDefaults.colors(checkedThumbColor = Blue)
+                                    )
+                                }
+                                
+                                if (enablePassword) {
+                                    Spacer(Modifier.height(12.dp))
+                                    OutlinedTextField(
+                                        value = passwordValue,
+                                        onValueChange = { 
+                                            passwordValue = it
+                                            prefs.edit().putString("server_password", it).apply()
+                                            if (isRunning) fileServer?.setSecurity(enablePassword, it)
+                                        },
+                                        label = { Text("Server Password", fontSize = 12.sp) },
+                                        placeholder = { Text("e.g. 1234") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        singleLine = true,
+                                        visualTransformation = if (passwordVisible) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                                        trailingIcon = {
+                                            IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                                Icon(if (passwordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff, null, tint = Blue)
+                                            }
+                                        },
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedTextColor = TextColor,
+                                            unfocusedTextColor = TextColor,
+                                            cursorColor = Blue,
+                                            focusedBorderColor = Blue,
+                                            unfocusedBorderColor = TextColor.copy(alpha = 0.2f),
+                                            focusedContainerColor = Color.Transparent,
+                                            unfocusedContainerColor = Color.Transparent
+                                        )
+                                    )
+                                }
+
+                                Spacer(Modifier.height(20.dp))
+                                Divider(color = TextColor.copy(alpha = 0.05f))
+                                Spacer(Modifier.height(20.dp))
+
+                                // Modification Toggle
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Allow Modifications", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextColor)
+                                        Text("Allow uploads, deletes, and renames", fontSize = 11.sp, color = TextColor.copy(alpha = 0.6f))
+                                    }
+                                    Switch(
+                                        checked = allowModifications,
+                                        onCheckedChange = { 
+                                            allowModifications = it
+                                            prefs.edit().putBoolean("allow_modifications", it).apply()
+                                            if (isRunning) fileServer?.setToggles(it, allowPreviews)
+                                        },
+                                        colors = SwitchDefaults.colors(checkedThumbColor = Blue)
+                                    )
+                                }
+
+                                Spacer(Modifier.height(16.dp))
+
+                                // Previews Toggle
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Enable Previews", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextColor)
+                                        Text("Render images/videos in browser", fontSize = 11.sp, color = TextColor.copy(alpha = 0.6f))
+                                    }
+                                    Switch(
+                                        checked = allowPreviews,
+                                        onCheckedChange = { 
+                                            allowPreviews = it
+                                            prefs.edit().putBoolean("allow_previews", it).apply()
+                                            if (isRunning) fileServer?.setToggles(allowModifications, it)
+                                        },
+                                        colors = SwitchDefaults.colors(checkedThumbColor = Blue)
+                                    )
                                 }
                             }
                         }

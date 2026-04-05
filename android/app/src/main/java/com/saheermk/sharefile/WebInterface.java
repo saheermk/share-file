@@ -220,6 +220,16 @@ public class WebInterface {
             "  document.querySelectorAll('.item-card.selected').forEach(el => el.classList.remove('selected'));" +
             "  document.getElementById('fab').classList.remove('show');" +
             "}" +
+            "async function deleteSelected() {" +
+            "  if (selectedFiles.size === 0) return;" +
+            "  const res = await Swal.fire({ title: 'Delete ' + selectedFiles.size + ' items?', text: 'This action cannot be undone.', icon: 'warning', showCancelButton: true, confirmButtonColor: '#d33' });"
+            +
+            "  if (!res.isConfirmed) return;" +
+            "  const files = Array.from(selectedFiles).map(encodeURIComponent).join(',');" +
+            "  const path = new URLSearchParams(window.location.search).get('path') || '';" +
+            "  location.href = '/delete_multiple?files=' + files + '&path=' + encodeURIComponent(path);" +
+            "  clearSelection();" +
+            "}" +
             "document.addEventListener('DOMContentLoaded', () => { " +
             "  initTheme(); initView(); " +
             "  document.body.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragover'); }); "
@@ -346,7 +356,30 @@ public class WebInterface {
         return sb.toString();
     }
 
-    public static String buildDirListing(File dir, File rootDir, String relPath) {
+    public static String buildLoginPage(String error) {
+        StringBuilder sb = new StringBuilder();
+        appendHead(sb, "Login Required");
+        sb.append("<div class='container' style='max-width:400px; padding-top:100px;'>")
+                .append("<div class='plate' style='text-align:center;'>")
+                .append("<img src='").append(APP_LOGO)
+                .append("' style='width:64px; height:64px; border-radius:12px; margin-bottom:24px;'>")
+                .append("<h2>Password Protected</h2>")
+                .append("<p style='opacity:0.7; margin-bottom:24px;'>Please enter the password to access this server.</p>")
+                .append("<form method='POST' action='/login'>")
+                .append("<input type='password' name='password' placeholder='Enter Password' required style='width:100%; padding:14px; border-radius:12px; border:none; background:var(--bg); color:var(--text); box-shadow:var(--inner-shadow); margin-bottom:20px; text-align:center;'>");
+        if (error != null && !error.isEmpty()) {
+            sb.append("<div style='color:red; margin-bottom:20px; font-size:14px;'>").append(escapeHtml(error))
+                    .append("</div>");
+        }
+        sb.append("<button type='submit' class='btn' style='width:100%; padding:14px;'>Unlock Server</button>")
+                .append("</form></div></div>");
+        appendFooter(sb);
+        sb.append("</body></html>");
+        return sb.toString();
+    }
+
+    public static String buildDirListing(File dir, File rootDir, String relPath, boolean allowModifications,
+            boolean allowPreviews) {
         String displayPath = relPath.isEmpty() ? "/" : "/" + relPath;
 
         StringBuilder sb = new StringBuilder();
@@ -373,7 +406,22 @@ public class WebInterface {
                 }
             }
         }
-        appendHeader(sb, "File Manager", subtitle.toString());
+
+        File[] children = dir.listFiles();
+        int fileCount = 0;
+        int folderCount = 0;
+        if (children != null) {
+            for (File f : children) {
+                if (f.isDirectory())
+                    folderCount++;
+                else if (f.isFile())
+                    fileCount++;
+            }
+        }
+
+        String countStr = "<span style='margin-left:12px; font-weight:normal; opacity:0.6;'>("
+                + folderCount + " folders, " + fileCount + " files)</span>";
+        appendHeader(sb, "File Manager", subtitle.toString() + countStr);
 
         sb.append("<div class='container'>");
 
@@ -382,31 +430,33 @@ public class WebInterface {
                 .append("<div class='search-box'><i class='fa-solid fa-search'></i><input type='text' id='search' placeholder='Search files...' oninput='filterFiles()'></div>")
                 .append("<select class='view-select' onchange='changeView(this.value)'><option value='grid'>Grid View</option><option value='list-names'>List (Names)</option><option value='list-icons'>List (Icons)</option><option value='list-detailed'>Detailed List</option></select>")
                 .append("<select class='sort-select' onchange='sortFiles(this.value)'><option value='name_asc'>Name (A-Z)</option><option value='name_desc'>Name (Z-A)</option><option value='date_desc'>Newest First</option><option value='date_asc'>Oldest First</option><option value='size_desc'>Largest First</option><option value='size_asc'>Smallest First</option></select>")
-                .append("<button class='btn' id='selectBtn' onclick='toggleSelectMode()'><i class='fa-solid fa-check-square'></i> Select</button>")
-                .append("<button class='btn' onclick=\"op(event, 'mkdir', '").append(escapeHtml(displayPath))
-                .append("')\"><i class='fa-solid fa-folder-plus'></i> New Folder</button>")
-                .append("<button class='btn' onclick=\"op(event, 'paste', '").append(escapeHtml(displayPath))
-                .append("')\"><i class='fa-solid fa-paste'></i> Paste</button>")
-                .append("</div>");
+                .append("<button class='btn' id='selectBtn' onclick='toggleSelectMode()'><i class='fa-solid fa-check-square'></i> Select</button>");
 
-        sb.append("<div class='container'>");
+        if (allowModifications) {
+            sb.append("<button class='btn' onclick=\"op(event, 'mkdir', '").append(escapeHtml(displayPath))
+                    .append("')\"><i class='fa-solid fa-folder-plus'></i> New Folder</button>")
+                    .append("<button class='btn' onclick=\"op(event, 'paste', '").append(escapeHtml(displayPath))
+                    .append("')\"><i class='fa-solid fa-paste'></i> Paste</button>");
+        }
+        sb.append("</div>");
+
         sb.append("<div class='plate'>");
 
-        // Upload form (TOP - Compact with Drag & Drop)
-        String uploadPath = relPath.isEmpty() ? "" : "/" + relPath;
-        sb.append(
-                "<div class='upload-section'>")
-                .append("<form id='uploadForm' class='upload-form' method='POST' action='/upload?path=")
-                .append(urlEncode(uploadPath))
-                .append("' enctype='multipart/form-data'>")
-                .append("<label for='fileInput' style='cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:10px; width:100%; border:none;'>")
-                .append("<div style='font-size: 14px; opacity: 0.8; font-weight: 600; text-align:center;'><i class='fa-solid fa-cloud-arrow-up' style='font-size: 24px; margin-bottom: 8px; display:block;'></i> Drag and drop files anywhere on the page, or click here to browse</div>")
-                .append("<input type='file' id='fileInput' name='file' multiple required onchange='if(typeof checkUpload === \"function\") checkUpload(); else document.getElementById(\"uploadForm\").submit()' style='display:none;'>")
-                .append("</label>")
-                .append("</form></div>");
+        // Upload form
+        if (allowModifications) {
+            String uploadPath = relPath.isEmpty() ? "" : "/" + relPath;
+            sb.append("<div class='upload-section'>")
+                    .append("<form id='uploadForm' class='upload-form' method='POST' action='/upload?path=")
+                    .append(urlEncode(uploadPath))
+                    .append("' enctype='multipart/form-data'>")
+                    .append("<label for='fileInput' style='cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:10px; width:100%; border:none;'>")
+                    .append("<div style='font-size: 14px; opacity: 0.8; font-weight: 600; text-align:center;'><i class='fa-solid fa-cloud-arrow-up' style='font-size: 24px; margin-bottom: 8px; display:block;'></i> Drag and drop files anywhere on the page, or click here to browse</div>")
+                    .append("<input type='file' id='fileInput' name='file' multiple required onchange='if(typeof checkUpload === \"function\") checkUpload(); else document.getElementById(\"uploadForm\").submit()' style='display:none;'>")
+                    .append("</label>")
+                    .append("</form></div>");
+        }
 
         // Gallery Grid
-        File[] children = dir.listFiles();
 
         sb.append("<script>const existingFiles = [");
         if (children != null) {
@@ -424,7 +474,13 @@ public class WebInterface {
         if (children == null || children.length == 0) {
             sb.append("<div class='empty'>This folder is empty.</div>");
         } else {
-            Arrays.sort(children, Comparator.comparing(File::isFile).thenComparing(f -> f.getName().toLowerCase()));
+            Arrays.sort(children, (a, b) -> {
+                if (a.isDirectory() && !b.isDirectory())
+                    return -1;
+                if (!a.isDirectory() && b.isDirectory())
+                    return 1;
+                return a.getName().compareToIgnoreCase(b.getName());
+            });
 
             sb.append("<div id='gallery' class='gallery grid'>");
             int idCounter = 0;
@@ -446,26 +502,35 @@ public class WebInterface {
                         .append(f.isDirectory()).append(", '").append(encodedPath).append("')\">")
                         .append("<div class='item-menu-btn' onclick=\"showMenu(event, ").append(idCounter)
                         .append(")\"><i class='fa-solid fa-ellipsis-v'></i></div>")
-                        .append("<div class='dropdown' id='m-").append(idCounter).append("'>")
-                        .append("<div class='dropdown-item' onclick=\"openNewTab(event, '")
-                        .append(escapeHtml(displayRel))
-                        .append("')\"><i class='fa-solid fa-arrow-up-right-from-square'></i> Open in New Tab</div>")
-                        .append("<div class='dropdown-item' onclick=\"event.preventDefault(); event.stopPropagation(); document.querySelectorAll('.dropdown').forEach(d => d.classList.remove('show')); if(!selectMode) toggleSelectMode(); toggleSelect(this.closest('.item-card'), this.closest('.item-card').dataset.path)\"><i class='fa-solid fa-check-square'></i> Select</div>")
+                        .append("<div class='dropdown' id='m-").append(idCounter).append("'>");
+
+                if (allowPreviews) {
+                    sb.append("<div class='dropdown-item' onclick=\"openNewTab(event, '")
+                            .append(escapeHtml(displayRel))
+                            .append("')\"><i class='fa-solid fa-arrow-up-right-from-square'></i> Open in New Tab</div>");
+                }
+
+                sb.append(
+                        "<div class='dropdown-item' onclick=\"event.preventDefault(); event.stopPropagation(); document.querySelectorAll('.dropdown').forEach(d => d.classList.remove('show')); if(!selectMode) toggleSelectMode(); toggleSelect(this.closest('.item-card'), this.closest('.item-card').dataset.path)\"><i class='fa-solid fa-check-square'></i> Select</div>")
                         .append("<div class='dropdown-item' onclick=\"event.stopPropagation(); location.href='/download?file=")
-                        .append(encodedPath).append("&dl=1'\"><i class='fa-solid fa-download'></i> Download</div>")
-                        .append("<div class='dropdown-item' onclick=\"op(event, 'rename', '")
-                        .append(escapeHtml(displayRel))
-                        .append(f.isDirectory() ? "" : "', '" + escapeHtml(f.getName()))
-                        .append("')\"><i class='fa-solid fa-pen'></i> Rename</div>")
-                        .append("<div class='dropdown-item' onclick=\"op(event, 'cut', '")
-                        .append(escapeHtml(displayRel))
-                        .append("')\"><i class='fa-solid fa-scissors'></i> Cut</div>")
-                        .append("<div class='dropdown-item' onclick=\"op(event, 'copy', '")
-                        .append(escapeHtml(displayRel))
-                        .append("')\"><i class='fa-solid fa-copy'></i> Copy</div>")
-                        .append("<div class='dropdown-item' style='color:red;' onclick=\"op(event, 'delete', '")
-                        .append(escapeHtml(displayRel)).append("')\"><i class='fa-solid fa-trash'></i> Delete</div>")
-                        .append("</div>");
+                        .append(encodedPath).append("&dl=1'\"><i class='fa-solid fa-download'></i> Download</div>");
+
+                if (allowModifications) {
+                    sb.append("<div class='dropdown-item' onclick=\"op(event, 'rename', '")
+                            .append(escapeHtml(displayRel))
+                            .append(f.isDirectory() ? "" : "', '" + escapeHtml(f.getName()))
+                            .append("')\"><i class='fa-solid fa-pen'></i> Rename</div>")
+                            .append("<div class='dropdown-item' onclick=\"op(event, 'cut', '")
+                            .append(escapeHtml(displayRel))
+                            .append("')\"><i class='fa-solid fa-scissors'></i> Cut</div>")
+                            .append("<div class='dropdown-item' onclick=\"op(event, 'copy', '")
+                            .append(escapeHtml(displayRel))
+                            .append("')\"><i class='fa-solid fa-copy'></i> Copy</div>")
+                            .append("<div class='dropdown-item' style='color:red;' onclick=\"op(event, 'delete', '")
+                            .append(escapeHtml(displayRel))
+                            .append("')\"><i class='fa-solid fa-trash'></i> Delete</div>");
+                }
+                sb.append("</div>");
 
                 sb.append("<div class='item-left'>");
                 if (f.isDirectory()) {
@@ -511,8 +576,12 @@ public class WebInterface {
         sb.append("<div id='fab' class='fab-container'>")
                 .append("<span style='font-size:14px; font-weight:600;'><span id='sel-count'>0</span> Selected</span>")
                 .append("<button class='btn' onclick='downloadZip()'><i class='fa-solid fa-file-zipper'></i> ZIP</button>")
-                .append("<button class='btn' onclick='downloadQueue()'><i class='fa-solid fa-download'></i> Files</button>")
-                .append("<button class='btn' onclick='clearSelection()'><i class='fa-solid fa-xmark'></i> Cancel</button>")
+                .append("<button class='btn' onclick='downloadQueue()'><i class='fa-solid fa-download'></i> Files</button>");
+        if (allowModifications) {
+            sb.append(
+                    "<button class='btn' style='color:#ea4335;' onclick='deleteSelected()'><i class='fa-solid fa-trash'></i> Delete</button>");
+        }
+        sb.append("<button class='btn' onclick='clearSelection()'><i class='fa-solid fa-xmark'></i> Cancel</button>")
                 .append("</div>");
 
         appendFooter(sb);

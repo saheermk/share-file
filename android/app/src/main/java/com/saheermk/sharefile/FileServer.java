@@ -39,6 +39,14 @@ public class FileServer {
     private volatile boolean running;
     private ExecutorService pool;
 
+    // Advanced Settings
+    private String password = "";
+    private boolean passwordEnabled = false;
+    private boolean allowModifications = true;
+    private boolean allowPreviews = true;
+    private String selectedInterface = "0.0.0.0";
+    private final Set<String> sessions = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+
     public interface OnServerListener {
         void onStarted(String ip, int port);
 
@@ -56,6 +64,20 @@ public class FileServer {
         this.listener = listener;
     }
 
+    public void setSecurity(boolean enabled, String pwd) {
+        this.passwordEnabled = enabled;
+        this.password = pwd;
+    }
+
+    public void setToggles(boolean allowMod, boolean allowPrev) {
+        this.allowModifications = allowMod;
+        this.allowPreviews = allowPrev;
+    }
+
+    public void setInterface(String ip) {
+        this.selectedInterface = ip;
+    }
+
     public void setRootDir(File dir) {
         this.rootDir = dir;
     }
@@ -64,10 +86,11 @@ public class FileServer {
         pool = Executors.newFixedThreadPool(8);
         new Thread(() -> {
             try {
-                serverSocket = new ServerSocket(port);
+                InetAddress addr = InetAddress.getByName(selectedInterface);
+                serverSocket = new ServerSocket(port, 50, addr);
                 running = true;
                 if (listener != null)
-                    listener.onStarted(getLocalIp(), port);
+                    listener.onStarted(selectedInterface.equals("0.0.0.0") ? getLocalIp() : selectedInterface, port);
                 while (running) {
                     try {
                         Socket client = serverSocket.accept();
@@ -131,6 +154,10 @@ public class FileServer {
             String method = parts[0];
             String rawPath = parts[1];
 
+            // Auth check
+            String cookie = headers.getOrDefault("cookie", "");
+            boolean authenticated = !passwordEnabled || isAuthorized(cookie);
+
             // Split path and query
             String path, query = "";
             int qIdx = rawPath.indexOf('?');
@@ -144,6 +171,21 @@ public class FileServer {
             if (listener != null)
                 listener.onLog(method + " " + rawPath);
             log("REQUEST: " + method + " " + rawPath);
+
+            // Special route: login
+            if (path.equals("/login")) {
+                if ("POST".equalsIgnoreCase(method)) {
+                    handleLoginPost(rawOut, headers, rawIn);
+                } else {
+                    sendHtml(rawOut, WebInterface.buildLoginPage(""));
+                }
+                return;
+            }
+
+            if (!authenticated) {
+                sendRedirect(rawOut, "/login");
+                return;
+            }
 
             if ("GET".equalsIgnoreCase(method)) {
                 handleGet(rawOut, path, query);
@@ -163,6 +205,46 @@ public class FileServer {
                 socket.close();
             } catch (IOException ignored) {
             }
+        }
+    }
+
+    private boolean isAuthorized(String cookie) {
+        if (cookie == null || cookie.isEmpty())
+            return false;
+        for (String c : cookie.split(";")) {
+            String[] kv = c.trim().split("=", 2);
+            if (kv.length == 2 && "SHTTPS_SESSION".equals(kv[0])) {
+                return sessions.contains(kv[1]);
+            }
+        }
+        return false;
+    }
+
+    private void handleLoginPost(OutputStream out, Map<String, String> headers, InputStream in) throws IOException {
+        int len = Integer.parseInt(headers.getOrDefault("content-length", "0"));
+        byte[] body = new byte[len];
+        int read = 0;
+        while (read < len) {
+            int n = in.read(body, read, len - read);
+            if (n < 0)
+                break;
+            read += n;
+        }
+        String bodyStr = new String(body);
+        String passInput = getQueryParam(bodyStr, "password"); // getQueryParam works for body too if urlencoded
+
+        if (password.equals(passInput)) {
+            String sessionId = UUID.randomUUID().toString();
+            sessions.add(sessionId);
+            String resp = "HTTP/1.1 302 Found\r\n" +
+                    "Location: /\r\n" +
+                    "Set-Cookie: SHTTPS_SESSION=" + sessionId + "; Path=/; HttpOnly\r\n" +
+                    "Content-Length: 0\r\n" +
+                    "Connection: close\r\n\r\n";
+            out.write(resp.getBytes("UTF-8"));
+            out.flush();
+        } else {
+            sendHtml(out, WebInterface.buildLoginPage("Invalid password. Please try again."));
         }
     }
 
@@ -207,19 +289,46 @@ public class FileServer {
 
         // --- File Operations ---
         if (path.equals("/mkdir")) {
+            if (!allowModifications) {
+                sendError(out, 403, "Modifications disabled");
+                return;
+            }
             handleMkdir(out, query);
             return;
         } else if (path.equals("/delete")) {
+            if (!allowModifications) {
+                sendError(out, 403, "Modifications disabled");
+                return;
+            }
             handleDelete(out, query);
             return;
         } else if (path.equals("/rename")) {
+            if (!allowModifications) {
+                sendError(out, 403, "Modifications disabled");
+                return;
+            }
             handleRename(out, query);
             return;
         } else if (path.equals("/copy") || path.equals("/cut")) {
+            if (!allowModifications) {
+                sendError(out, 403, "Modifications disabled");
+                return;
+            }
             handleClipboardAction(out, path, query);
             return;
         } else if (path.equals("/paste")) {
+            if (!allowModifications) {
+                sendError(out, 403, "Modifications disabled");
+                return;
+            }
             handlePaste(out, query);
+            return;
+        } else if (path.equals("/delete_multiple")) {
+            if (!allowModifications) {
+                sendError(out, 403, "Modifications disabled");
+                return;
+            }
+            handleMultipleDelete(out, query);
             return;
         } else if (path.equals("/zip")) {
             handleZip(out, query);
@@ -243,7 +352,8 @@ public class FileServer {
             }
 
             if (target.isDirectory() && path.equals("/files")) {
-                sendHtml(out, WebInterface.buildDirListing(target, rootDir, relPath));
+                sendHtml(out,
+                        WebInterface.buildDirListing(target, rootDir, relPath, allowModifications, allowPreviews));
             } else if (target.isFile()) {
                 boolean forceDownload = "1".equals(getQueryParam(query, "dl"));
                 streamFile(out, target, forceDownload);
@@ -305,6 +415,26 @@ public class FileServer {
                     deleteRecursive(k);
         }
         return f.delete();
+    }
+
+    private void handleMultipleDelete(OutputStream out, String query) throws IOException {
+        String filesParam = getQueryParam(query, "files");
+        String parentPath = getQueryParam(query, "path");
+        if (filesParam == null || filesParam.isEmpty()) {
+            sendError(out, 400, "Files required");
+            return;
+        }
+        if (parentPath == null)
+            parentPath = "";
+
+        String[] filePaths = filesParam.split(",");
+        for (String p : filePaths) {
+            File f = new File(rootDir, p.startsWith("/") ? p.substring(1) : p);
+            if (isInsideRoot(f)) {
+                deleteRecursive(f);
+            }
+        }
+        sendRedirect(out, "/files?path=" + WebInterface.urlEncode(parentPath));
     }
 
     private void handleRename(OutputStream out, String query) throws IOException {
@@ -489,6 +619,10 @@ public class FileServer {
         }
 
         // Destination directory
+        if (!allowModifications) {
+            sendError(out, 403, "Modifications disabled");
+            return;
+        }
         String relPath = getQueryParam(query, "path");
         if (relPath == null)
             relPath = "";
@@ -558,7 +692,7 @@ public class FileServer {
         if (mime == null)
             mime = "application/octet-stream";
 
-        String disposition = forceDownload ? "attachment" : "inline";
+        String disposition = (forceDownload || !allowPreviews) ? "attachment" : "inline";
         StringBuilder sb = new StringBuilder();
         sb.append("HTTP/1.1 200 OK\r\n")
                 .append("Content-Type: ").append(mime).append("\r\n")
