@@ -68,3 +68,7 @@ java_pid*.hprof
 !/android/app/src/androidTest/
 
 SHTTPS_3.0.4.apks
+
+node_modules/
+.vscode/
+.env
