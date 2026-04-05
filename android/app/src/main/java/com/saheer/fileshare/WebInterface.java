@@ -367,7 +367,7 @@ public class WebInterface {
                         .append(escapeHtml(displayRel))
                         .append("')\"><i class='fa-solid fa-arrow-up-right-from-square'></i> Open in New Tab</div>")
                         .append("<div class='dropdown-item' onclick=\"event.preventDefault(); event.stopPropagation(); document.querySelectorAll('.dropdown').forEach(d => d.classList.remove('show')); if(!selectMode) toggleSelectMode(); toggleSelect(this.closest('.item-card'), this.closest('.item-card').dataset.path)\"><i class='fa-solid fa-check-square'></i> Select</div>")
-                        .append("<div class='dropdown-item' onclick=\"location.href='/download?file=")
+                        .append("<div class='dropdown-item' onclick=\"event.stopPropagation(); location.href='/download?file=")
                         .append(encodedPath).append("&dl=1'\"><i class='fa-solid fa-download'></i> Download</div>")
                         .append("<div class='dropdown-item' onclick=\"op(event, 'rename', '")
                         .append(escapeHtml(displayRel))
