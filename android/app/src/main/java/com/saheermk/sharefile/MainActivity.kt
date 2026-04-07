@@ -33,6 +33,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,13 +54,12 @@ import kotlin.collections.ArrayList
 
 class MainActivity : ComponentActivity() {
 
-    private var fileServer: FileServer? = null
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent { ShttsApp() }
     }
 
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     fun ShttsApp() {
         val context = LocalContext.current
@@ -90,9 +90,7 @@ class MainActivity : ComponentActivity() {
             )
         }
         var port by remember { mutableStateOf(prefs.getInt("port", 8080).toString()) }
-        var isRunning by remember { mutableStateOf(false) }
-        var serverUrl by remember { mutableStateOf("") }
-        val logs = remember { mutableStateListOf<String>() }
+        val logs = ServerManager.logs
         var showFolderPicker by remember { mutableStateOf(false) }
         var showQr by remember { mutableStateOf(false) }
 
@@ -102,14 +100,60 @@ class MainActivity : ComponentActivity() {
         var passwordVisible by remember { mutableStateOf(false) }
         var allowModifications by remember { mutableStateOf(prefs.getBoolean("allow_modifications", true)) }
         var allowPreviews by remember { mutableStateOf(prefs.getBoolean("allow_previews", true)) }
+        var currentPage by remember { mutableStateOf("home") }
         var selectedInterface by remember { mutableStateOf(prefs.getString("selected_interface", "0.0.0.0")!!) }
         val interfaces = remember { mutableStateListOf<Pair<String, String>>() } // Name to IP
 
+        // Automation States
+        var autoStartBoot by remember { mutableStateOf(prefs.getBoolean("auto_start_boot", false)) }
+        var autoShutdownEnabled by remember { mutableStateOf(prefs.getBoolean("auto_shutdown_enabled", false)) }
+        var inactivityTimeout by remember { mutableStateOf(prefs.getInt("inactivity_timeout_min", 60).toString()) }
+        var showUrlActions by remember { mutableStateOf(false) }
+        var selectedClientForDetails by remember { mutableStateOf<ClientInfo?>(null) }
+
+        // HTTPS States
+        var useHttps by remember { mutableStateOf(prefs.getBoolean("use_https", false)) }
+        var certPath by remember { mutableStateOf(prefs.getString("cert_path", "")!!) }
+        var certPass by remember { mutableStateOf(prefs.getString("cert_password", "")!!) }
+        var certPassVisible by remember { mutableStateOf(false) }
+
+        val certPickerLauncher = rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.GetContent()) { uri ->
+            uri?.let {
+                // Get absolute path (simplified for internal/accessible storage)
+                // In a real app, you'd copy this to internal storage. Here we'll try to use the path if possible.
+                // For simplicity, we'll ask user to provide a path or use a helper to resolve it.
+                // For now, let's assume we can get a path or just use the URI string (though File needs path).
+                // Actually, let's just use a text field for the path for now to be safe, 
+                // OR copy the file to internal storage.
+                
+                try {
+                    val inputStream = context.contentResolver.openInputStream(it)
+                    val file = File(context.filesDir, "server_cert.p12")
+                    val outputStream = java.io.FileOutputStream(file)
+                    inputStream?.copyTo(outputStream)
+                    inputStream?.close()
+                    outputStream.close()
+                    
+                    certPath = file.absolutePath
+                    prefs.edit().putString("cert_path", certPath).apply()
+                    Toast.makeText(context, "Certificate imported", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+
         val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
             if (result.contents != null) {
-                if (result.contents.startsWith("http://") || result.contents.startsWith("https://")) {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(result.contents)))
-                    logs.add("Opened: ${result.contents}")
+                val content = result.contents
+                if (content.startsWith("http://") || content.startsWith("https://")) {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(content)))
+                    logs.add("Opened: $content")
+                } else if (content.matches(Regex("^(\\d{1,3}\\.){3}\\d{1,3}$")) || content.contains(":")) {
+                    // Looks like an IP address (IPv4 or IPv6)
+                    ServerManager.allowIp(context, content)
+                    Toast.makeText(context, "Device Approved: $content", Toast.LENGTH_LONG).show()
+                    logs.add("Authorized Device: $content")
                 } else {
                     Toast.makeText(context, "Invalid QR content", Toast.LENGTH_SHORT).show()
                 }
@@ -117,6 +161,7 @@ class MainActivity : ComponentActivity() {
         }
 
         LaunchedEffect(Unit) {
+            ServerManager.init(context)
             hasPermission = checkAllFilesAccess()
             
             // Discover Interfaces
@@ -129,7 +174,7 @@ class MainActivity : ComponentActivity() {
                     val addrs = netint.inetAddresses
                     for (inetAddress in Collections.list(addrs)) {
                         if (inetAddress is java.net.Inet4Address) {
-                            interfaces.add("${netint.displayName}" to inetAddress.hostAddress)
+                            interfaces.add("${netint.displayName}" to (inetAddress.hostAddress ?: "Unknown"))
                         }
                     }
                 }
@@ -161,9 +206,37 @@ class MainActivity : ComponentActivity() {
                         
                         Row(
                             modifier = Modifier.align(Alignment.CenterEnd),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            // Clients Button (New)
+                            val clientCount = ServerManager.connectedClients.size
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .neumorphicShadow(CircleShape, if(isDark) Color(0xFF2E3238) else Color.White, if(isDark) Color(0xFF0F1113) else Color(0xFFA3B1C6).copy(alpha = 0.6f), isDark)
+                                    .background(BgColor, CircleShape)
+                                    .clickable { currentPage = if (currentPage == "home") "clients" else "home" },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                BadgedBox(
+                                    badge = {
+                                        if (clientCount > 0) {
+                                            Badge(containerColor = Blue, contentColor = Color.White) {
+                                                Text(clientCount.toString(), fontSize = 10.sp)
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    Icon(
+                                        if (currentPage == "home") Icons.Default.Groups else Icons.Default.Home,
+                                        contentDescription = "Clients",
+                                        tint = if (currentPage == "clients") Blue else TextColor,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+
                             // Scan Button
                             Box(
                                 modifier = Modifier
@@ -172,10 +245,11 @@ class MainActivity : ComponentActivity() {
                                     .background(BgColor, CircleShape)
                                     .clickable { 
                                         scanLauncher.launch(ScanOptions().apply {
-                                            setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                                            setPrompt("Scan QR Code to Connect")
-                                            setBeepEnabled(false)
+                                            setDesiredBarcodeFormats(ScanOptions.ALL_CODE_TYPES)
+                                            setPrompt("Align QR code inside the frame")
+                                            setBeepEnabled(true)
                                             setOrientationLocked(false)
+                                            setBarcodeImageEnabled(true)
                                         })
                                     },
                                 contentAlignment = Alignment.Center
@@ -200,10 +274,11 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize().weight(1f).padding(horizontal = 20.dp),
-                        verticalArrangement = Arrangement.spacedBy(24.dp)
-                    ) {
+                    if (currentPage == "home") {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize().weight(1f).padding(horizontal = 20.dp),
+                            verticalArrangement = Arrangement.spacedBy(24.dp)
+                        ) {
                         // ─── Permission ───────────────────────────────────────────────────
                         if (!hasPermission) {
                             item {
@@ -281,9 +356,9 @@ class MainActivity : ComponentActivity() {
                                     Column {
                                         Text("SERVER STATUS", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Box(Modifier.size(8.dp).background(if (isRunning) Green else Red, CircleShape))
+                                            Box(Modifier.size(8.dp).background(if (ServerManager.isRunning) Green else Red, CircleShape))
                                             Spacer(Modifier.width(8.dp))
-                                            Text(if (isRunning) "Running" else "Stopped", fontWeight = FontWeight.Bold, color = TextColor)
+                                            Text(if (ServerManager.isRunning) "Running" else "Stopped", fontWeight = FontWeight.Bold, color = TextColor)
                                         }
                                     }
                                     // Port Input
@@ -297,7 +372,7 @@ class MainActivity : ComponentActivity() {
                                             onValueChange = { newValue -> 
                                                 if (newValue.length <= 5 && newValue.all { it.isDigit() }) port = newValue 
                                             },
-                                            enabled = !isRunning,
+                                            enabled = !ServerManager.isRunning,
                                             textStyle = TextStyle(color = TextColor, fontWeight = FontWeight.Bold, fontSize = 14.sp),
                                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                             singleLine = true
@@ -305,17 +380,18 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
 
-                                if (isRunning && serverUrl.isNotEmpty()) {
+                                if (ServerManager.isRunning && ServerManager.serverUrl.isNotEmpty()) {
                                     Spacer(Modifier.height(20.dp))
                                     Box(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .background(TextColor.copy(alpha = 0.05f), RoundedCornerShape(12.dp))
+                                            .clickable { showUrlActions = true }
                                             .padding(12.dp)
                                     ) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(serverUrl, modifier = Modifier.weight(1f), color = Blue, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                            IconButton(onClick = { clipboard.setText(AnnotatedString(serverUrl)); logs.add("Copied URL") }) {
+                                            Text(ServerManager.serverUrl, modifier = Modifier.weight(1f), color = Blue, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                            IconButton(onClick = { clipboard.setText(AnnotatedString(ServerManager.serverUrl)); logs.add("Copied URL") }) {
                                                 Icon(Icons.Default.ContentCopy, null, tint = Blue, modifier = Modifier.size(18.dp))
                                             }
                                             IconButton(onClick = { showQr = true }) {
@@ -326,32 +402,16 @@ class MainActivity : ComponentActivity() {
                                 }
 
                                 Spacer(Modifier.height(24.dp))
-                                NeumorphicButton(
+                                 NeumorphicButton(
                                     onClick = {
-                                        if (isRunning) {
-                                            fileServer?.stop()
-                                            isRunning = false
-                                            serverUrl = ""
-                                            logs.add("Stopped server")
+                                        if (ServerManager.isRunning) {
                                             context.stopService(Intent(context, KeepAliveService::class.java))
+                                            ServerManager.stopServer(context)
                                         } else {
                                             val p = port.toIntOrNull() ?: 8080
-                                            val listener = object : FileServer.OnServerListener {
-                                                override fun onStarted(ip: String, port: Int) {
-                                                    serverUrl = "http://$ip:$port"
-                                                    isRunning = true
-                                                    logs.add("Started @ $serverUrl")
-                                                }
-                                                override fun onStopped() { isRunning = false; logs.add("Server down") }
-                                                override fun onError(msg: String) { logs.add("ERR: $msg") }
-                                                override fun onLog(msg: String) { logs.add(msg) }
-                                            }
-                                            fileServer = FileServer(p, selectedRoot, context, listener)
-                                            fileServer?.setSecurity(enablePassword, passwordValue)
-                                            fileServer?.setToggles(allowModifications, allowPreviews)
-                                            fileServer?.setInterface(selectedInterface)
-                                            fileServer?.start()
                                             prefs.edit().putInt("port", p).apply()
+                                            
+                                            ServerManager.startServer(context)
                                             
                                             val serviceIntent = Intent(context, KeepAliveService::class.java)
                                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -362,12 +422,12 @@ class MainActivity : ComponentActivity() {
                                         }
                                     },
                                     modifier = Modifier.fillMaxWidth().height(56.dp),
-                                    accentColor = if (isRunning) Red else Green,
+                                    accentColor = if (ServerManager.isRunning) Red else Green,
                                     isDark = isDark
                                 ) {
-                                    Icon(if (isRunning) Icons.Default.PowerSettingsNew else Icons.Default.PlayArrow, null)
+                                    Icon(if (ServerManager.isRunning) Icons.Default.PowerSettingsNew else Icons.Default.PlayArrow, null)
                                     Spacer(Modifier.width(12.dp))
-                                    Text(if (isRunning) "STOP SERVER" else "START SERVER", fontWeight = FontWeight.Black)
+                                    Text(if (ServerManager.isRunning) "STOP SERVER" else "START SERVER", fontWeight = FontWeight.Black)
                                 }
                             }
                         }
@@ -381,11 +441,11 @@ class MainActivity : ComponentActivity() {
                                 var expanded by remember { mutableStateOf(false) }
                                 Box(modifier = Modifier.fillMaxWidth().wrapContentSize(Alignment.TopStart)) {
                                     OutlinedButton(
-                                        onClick = { if (!isRunning) expanded = true },
+                                        onClick = { if (!ServerManager.isRunning) expanded = true },
                                         modifier = Modifier.fillMaxWidth(),
                                         shape = RoundedCornerShape(12.dp),
                                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Blue, disabledContentColor = Blue.copy(alpha = 0.7f)),
-                                        enabled = !isRunning
+                                        enabled = !ServerManager.isRunning
                                     ) {
                                         val currentLabel = interfaces.find { it.second == selectedInterface }?.first ?: "Custom"
                                         Text("${currentLabel} (${selectedInterface})", fontSize = 13.sp)
@@ -417,7 +477,7 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                 }
-                                if (isRunning) {
+                                if (ServerManager.isRunning) {
                                     Text("Stop server to change interface", fontSize = 10.sp, color = Red.copy(alpha = 0.7f), modifier = Modifier.padding(top = 4.dp))
                                 }
                             }
@@ -428,6 +488,25 @@ class MainActivity : ComponentActivity() {
                             val cardBg = if (isDark) Color(0xFF1E2126) else BgColor
                             NeumorphicCard(isDark = isDark, bgColor = cardBg) {
                                 Text("SECURITY & SETTINGS", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
+                                Spacer(Modifier.height(16.dp))
+
+                                // Strict Mode Toggle (Requested as first toggle)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Strict Approval Mode", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextColor)
+                                        Text("New devices must be scanned by you", fontSize = 11.sp, color = TextColor.copy(alpha = 0.6f))
+                                    }
+                                    Switch(
+                                        checked = ServerManager.strictMode,
+                                        onCheckedChange = { 
+                                            ServerManager.updateStrictMode(context, it)
+                                        },
+                                        colors = SwitchDefaults.colors(checkedThumbColor = Blue)
+                                    )
+                                }
+
+                                Spacer(Modifier.height(16.dp))
+                                Divider(color = TextColor.copy(alpha = 0.05f))
                                 Spacer(Modifier.height(16.dp))
                                 
                                 // Password Toggle
@@ -441,7 +520,7 @@ class MainActivity : ComponentActivity() {
                                         onCheckedChange = { 
                                             enablePassword = it
                                             prefs.edit().putBoolean("enable_password", it).apply()
-                                            if (isRunning) fileServer?.setSecurity(it, passwordValue)
+                                            if (ServerManager.isRunning) ServerManager.fileServer?.setSecurity(it, passwordValue)
                                         },
                                         colors = SwitchDefaults.colors(checkedThumbColor = Blue)
                                     )
@@ -454,7 +533,7 @@ class MainActivity : ComponentActivity() {
                                         onValueChange = { 
                                             passwordValue = it
                                             prefs.edit().putString("server_password", it).apply()
-                                            if (isRunning) fileServer?.setSecurity(enablePassword, it)
+                                            if (ServerManager.isRunning) ServerManager.fileServer?.setSecurity(enablePassword, it)
                                         },
                                         label = { Text("Server Password", fontSize = 12.sp) },
                                         placeholder = { Text("e.g. 1234") },
@@ -495,7 +574,7 @@ class MainActivity : ComponentActivity() {
                                         onCheckedChange = { 
                                             allowModifications = it
                                             prefs.edit().putBoolean("allow_modifications", it).apply()
-                                            if (isRunning) fileServer?.setToggles(it, allowPreviews)
+                                            if (ServerManager.isRunning) ServerManager.fileServer?.setToggles(it, allowPreviews)
                                         },
                                         colors = SwitchDefaults.colors(checkedThumbColor = Blue)
                                     )
@@ -514,7 +593,7 @@ class MainActivity : ComponentActivity() {
                                         onCheckedChange = { 
                                             allowPreviews = it
                                             prefs.edit().putBoolean("allow_previews", it).apply()
-                                            if (isRunning) fileServer?.setToggles(allowModifications, it)
+                                            if (ServerManager.isRunning) ServerManager.fileServer?.setToggles(allowModifications, it)
                                         },
                                         colors = SwitchDefaults.colors(checkedThumbColor = Blue)
                                     )
@@ -522,6 +601,152 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
+                        // ─── Automation Settings ──────────────────────────────────────────
+                        item {
+                            val cardBg = if (isDark) Color(0xFF1E2126) else BgColor
+                            NeumorphicCard(isDark = isDark, bgColor = cardBg) {
+                                Text("AUTOMATION", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
+                                Spacer(Modifier.height(16.dp))
+
+                                // Auto Start on Boot
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Auto Start on Boot", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextColor)
+                                        Text("Start server when device restarts", fontSize = 11.sp, color = TextColor.copy(alpha = 0.6f))
+                                    }
+                                    Switch(
+                                        checked = autoStartBoot,
+                                        onCheckedChange = {
+                                            autoStartBoot = it
+                                            prefs.edit().putBoolean("auto_start_boot", it).apply()
+                                        },
+                                        colors = SwitchDefaults.colors(checkedThumbColor = Blue)
+                                    )
+                                }
+
+                                Spacer(Modifier.height(16.dp))
+
+                                // Auto Shutdown
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Auto Shutdown", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextColor)
+                                        Text("Stop server after inactivity", fontSize = 11.sp, color = TextColor.copy(alpha = 0.6f))
+                                    }
+                                    Switch(
+                                        checked = autoShutdownEnabled,
+                                        onCheckedChange = {
+                                            autoShutdownEnabled = it
+                                            prefs.edit().putBoolean("auto_shutdown_enabled", it).apply()
+                                        },
+                                        colors = SwitchDefaults.colors(checkedThumbColor = Blue)
+                                    )
+                                }
+
+                                if (autoShutdownEnabled) {
+                                    Spacer(Modifier.height(12.dp))
+                                    OutlinedTextField(
+                                        value = inactivityTimeout,
+                                        onValueChange = {
+                                            if (it.all { char -> char.isDigit() }) {
+                                                inactivityTimeout = it
+                                                it.toIntOrNull()?.let { mins ->
+                                                    prefs.edit().putInt("inactivity_timeout_min", mins).apply()
+                                                }
+                                            }
+                                        },
+                                        label = { Text("Timeout (minutes)", fontSize = 12.sp) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedTextColor = TextColor,
+                                            unfocusedTextColor = TextColor,
+                                            cursorColor = Blue,
+                                            focusedBorderColor = Blue,
+                                            unfocusedBorderColor = TextColor.copy(alpha = 0.2f),
+                                            focusedContainerColor = Color.Transparent,
+                                            unfocusedContainerColor = Color.Transparent
+                                        )
+                                    )
+                                }
+
+                                Spacer(Modifier.height(20.dp))
+                                Divider(color = TextColor.copy(alpha = 0.05f))
+                                Spacer(Modifier.height(20.dp))
+
+                                // HTTPS Section
+                                Text("HTTPS (TLS) ENCRYPTION", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
+                                Spacer(Modifier.height(16.dp))
+
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Enable HTTPS", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextColor)
+                                        Text("Use secure encrypted connection", fontSize = 11.sp, color = TextColor.copy(alpha = 0.6f))
+                                    }
+                                    Switch(
+                                        checked = useHttps,
+                                        onCheckedChange = {
+                                            if (it && certPath.isEmpty()) {
+                                                Toast.makeText(context, "Import a certificate first", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                useHttps = it
+                                                prefs.edit().putBoolean("use_https", it).apply()
+                                            }
+                                        },
+                                        colors = SwitchDefaults.colors(checkedThumbColor = Blue)
+                                    )
+                                }
+
+                                if (useHttps || certPath.isNotEmpty()) {
+                                    Spacer(Modifier.height(16.dp))
+                                    NeumorphicCard(isDark = isDark, bgColor = if (isDark) Color(0xFF25282D) else Color.White.copy(alpha = 0.5f)) {
+                                        Column {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text("Certificate File", fontSize = 11.sp, color = TextColor.copy(alpha = 0.5f))
+                                                    Text(if (certPath.isNotEmpty()) File(certPath).name else "None selected", fontSize = 13.sp, color = TextColor, fontWeight = FontWeight.Medium)
+                                                }
+                                                IconButton(onClick = { certPickerLauncher.launch("application/x-pkcs12") }) {
+                                                    Icon(Icons.Default.UploadFile, null, tint = Blue)
+                                                }
+                                            }
+                                            
+                                            if (certPath.isNotEmpty()) {
+                                                Spacer(Modifier.height(12.dp))
+                                                OutlinedTextField(
+                                                    value = certPass,
+                                                    onValueChange = {
+                                                        certPass = it
+                                                        prefs.edit().putString("cert_password", it).apply()
+                                                    },
+                                                    label = { Text("Certificate Password", fontSize = 10.sp) },
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    singleLine = true,
+                                                    visualTransformation = if (certPassVisible) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                                                    trailingIcon = {
+                                                        IconButton(onClick = { certPassVisible = !certPassVisible }) {
+                                                            Icon(if (certPassVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff, null, tint = Blue, modifier = Modifier.size(18.dp))
+                                                        }
+                                                    },
+                                                    colors = OutlinedTextFieldDefaults.colors(
+                                                        focusedTextColor = TextColor,
+                                                        unfocusedTextColor = TextColor,
+                                                        focusedBorderColor = Blue,
+                                                        unfocusedBorderColor = TextColor.copy(alpha = 0.1f)
+                                                    ),
+                                                    shape = RoundedCornerShape(8.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (useHttps) {
+                                        Spacer(Modifier.height(8.dp))
+                                        Text("Restart server to apply HTTPS", fontSize = 10.sp, color = Blue.copy(alpha = 0.8f))
+                                    }
+                                }
+                            }
+                        }
 
                         // ─── Activity Log ─────────────────────────────────────────────────
                         item {
@@ -568,16 +793,119 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                         Spacer(Modifier.height(8.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                            SocialIcon(ImageVector.vectorResource(id = R.drawable.ic_github), isDark = isDark) {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/saheermk/")))
-                            }
-                            SocialIcon(ImageVector.vectorResource(id = R.drawable.ic_linkedin), isDark = isDark) {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://in.linkedin.com/in/saheermk")))
+                        }
+                    } else if (currentPage == "clients") {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 24.dp, vertical = 24.dp)
+                        ) {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize().weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(24.dp)
+                            ) {
+                                // ─── Active Section ──────────────────────────────────────────
+                                item {
+                                    Text(
+                                        "ACTIVE CONNECTIONS",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Black,
+                                        color = TextColor.copy(alpha = 0.5f),
+                                        letterSpacing = 1.sp
+                                    )
+                                }
+
+                                if (ServerManager.connectedClients.isEmpty()) {
+                                    item {
+                                        Box(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text("No active clients", color = TextColor.copy(alpha = 0.4f), fontSize = 13.sp)
+                                        }
+                                    }
+                                } else {
+                                    items(ServerManager.connectedClients.values.toList()) { client ->
+                                        NeumorphicCard(
+                                            isDark = isDark,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { selectedClientForDetails = client }
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Box(
+                                                    Modifier
+                                                        .size(44.dp)
+                                                        .background(Blue.copy(alpha = 0.1f), CircleShape),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        when {
+                                                            client.deviceName.contains("PC") || client.deviceName.contains("Windows") || client.deviceName.contains("Mac") || client.deviceName.contains("Linux") -> Icons.Default.Computer
+                                                            else -> Icons.Default.Smartphone
+                                                        },
+                                                        null,
+                                                        tint = Blue,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                }
+                                                Spacer(Modifier.width(16.dp))
+                                                Column(Modifier.weight(1f)) {
+                                                    Text(client.deviceName, fontWeight = FontWeight.Bold, color = TextColor, fontSize = 14.sp)
+                                                    Text(client.ip, fontSize = 12.sp, color = TextColor.copy(alpha = 0.6f))
+                                                }
+                                                Box(
+                                                    modifier = Modifier
+                                                        .background(Green.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+                                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                ) {
+                                                    Text("ACTIVE", color = Green, fontSize = 9.sp, fontWeight = FontWeight.Black)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ─── Blocked Section ─────────────────────────────────────────
+                                if (ServerManager.blockedIps.isNotEmpty()) {
+                                    item {
+                                        Spacer(Modifier.height(8.dp))
+                                        Text(
+                                            "BLOCKED DEVICES",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = Red.copy(alpha = 0.6f),
+                                            letterSpacing = 1.sp
+                                        )
+                                    }
+
+                                    items(ServerManager.blockedIps.keys.toList()) { ip ->
+                                        val deviceName = ServerManager.archivedDeviceNames[ip] ?: "Unknown Device"
+                                        NeumorphicCard(isDark = isDark, modifier = Modifier.fillMaxWidth()) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Column(Modifier.weight(1f)) {
+                                                    Text(deviceName, fontWeight = FontWeight.Bold, color = TextColor, fontSize = 14.sp)
+                                                    Text(ip, fontSize = 12.sp, color = TextColor.copy(alpha = 0.6f))
+                                                }
+                                                Button(
+                                                    onClick = { ServerManager.toggleBlock(context, ip) },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Red.copy(alpha = 0.1f)),
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                                    modifier = Modifier.height(32.dp)
+                                                ) {
+                                                    Text("UNBLOCK", color = Red, fontSize = 10.sp, fontWeight = FontWeight.Black)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                }
 
                 // Dialogs
                 if (showFolderPicker) {
@@ -588,18 +916,18 @@ class MainActivity : ComponentActivity() {
                             selectedRoot = dir
                             prefs.edit().putString("root_path", dir.absolutePath).apply()
                             logs.add("Path changed")
-                            if (isRunning) fileServer?.setRootDir(dir)
+                            if (ServerManager.isRunning) ServerManager.fileServer?.setRootDir(dir)
                         }
                     )
                 }
 
-                if (showQr && serverUrl.isNotEmpty()) {
+                if (showQr && ServerManager.serverUrl.isNotEmpty()) {
                     Dialog(onDismissRequest = { showQr = false }) {
                         NeumorphicCard(bgColor = Color.White, isDark = false) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text("Scan to access", fontWeight = FontWeight.Black, fontSize = 16.sp, color = Color.Black)
                                 Spacer(Modifier.height(16.dp))
-                                val qrBmp = remember(serverUrl) { generateQrBitmap(serverUrl) }
+                                val qrBmp = remember(ServerManager.serverUrl) { generateQrBitmap(ServerManager.serverUrl) }
                                 if (qrBmp != null) {
                                     Image(bitmap = qrBmp.asImageBitmap(), contentDescription = "QR", modifier = Modifier.size(200.dp))
                                 }
@@ -611,9 +939,146 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+
+                if (showUrlActions && ServerManager.serverUrl.isNotEmpty()) {
+                    Dialog(onDismissRequest = { showUrlActions = false }) {
+                        NeumorphicCard(isDark = isDark, bgColor = if (isDark) Color(0xFF1E2126) else BgColor) {
+                            Column(Modifier.padding(8.dp)) {
+                                Text("URL Actions", fontWeight = FontWeight.Black, fontSize = 18.sp, color = TextColor, modifier = Modifier.padding(bottom = 16.dp))
+                                
+                                val actions = listOf(
+                                    Triple("Navigate", Icons.Default.OpenInNew) {
+                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(ServerManager.serverUrl)))
+                                    },
+                                    Triple("Copy", Icons.Default.ContentCopy) {
+                                        clipboard.setText(AnnotatedString(ServerManager.serverUrl))
+                                        logs.add("Copied URL")
+                                    },
+                                    Triple("Share", Icons.Default.Share) {
+                                        val sendIntent = Intent().apply {
+                                            action = Intent.ACTION_SEND
+                                            putExtra(Intent.EXTRA_TEXT, ServerManager.serverUrl)
+                                            type = "text/plain"
+                                        }
+                                        context.startActivity(Intent.createChooser(sendIntent, "Share URL"))
+                                    },
+                                    Triple("QR Code", Icons.Default.QrCode) {
+                                        showQr = true
+                                    }
+                                )
+
+                                actions.forEach { (label, icon, action) ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { action(); showUrlActions = false }
+                                            .padding(vertical = 12.dp, horizontal = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(icon, contentDescription = null, tint = Blue, modifier = Modifier.size(20.dp))
+                                        Spacer(Modifier.width(16.dp))
+                                        Text(label, color = TextColor, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (selectedClientForDetails != null) {
+            val client = selectedClientForDetails!!
+            Dialog(onDismissRequest = { selectedClientForDetails = null }) {
+                NeumorphicCard(isDark = isDark, bgColor = if (isDark) Color(0xFF1E2126) else BgColor) {
+                    Column(Modifier.padding(4.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                if (client.deviceName.contains("PC") || client.deviceName.contains("Windows") || client.deviceName.contains("Mac")) Icons.Default.Computer else Icons.Default.Smartphone,
+                                null, tint = Blue, modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(client.deviceName, fontWeight = FontWeight.Black, fontSize = 18.sp, color = TextColor)
+                                Text(client.ip, fontSize = 12.sp, color = TextColor.copy(alpha = 0.6f))
+                            }
+                        }
+                        
+                        Spacer(Modifier.height(24.dp))
+                        
+                        Text("PERMISSIONS", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f), letterSpacing = 1.sp)
+                        Spacer(Modifier.height(12.dp))
+                        
+                        // Per-client permission toggles
+                        // Note: Using null means use global. For UI simplicity, I'll show it as a toggle but state it overrides.
+                        val clientMod = client.customAllowModifications ?: allowModifications
+                        val clientPrev = client.customAllowPreviews ?: allowPreviews
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            val batteryText = if (client.batteryLevel != null) {
+                                "${client.batteryLevel}%" + (if (client.isCharging == true) " (Charging)" else "")
+                            } else "Unknown"
+                            Text("Battery Status", modifier = Modifier.weight(1f), color = TextColor, fontSize = 13.sp)
+                            Text(batteryText, fontWeight = FontWeight.Bold, color = Blue, fontSize = 13.sp)
+                        }
+                        Spacer(Modifier.height(16.dp))
+                        
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Allow Modifications", modifier = Modifier.weight(1f), color = TextColor, fontSize = 13.sp)
+                            Switch(
+                                checked = clientMod,
+                                onCheckedChange = { ServerManager.updateClientPermissions(client.ip, it, client.customAllowPreviews); selectedClientForDetails = ServerManager.connectedClients[client.ip] },
+                                colors = SwitchDefaults.colors(checkedThumbColor = Blue)
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Allow Previews", modifier = Modifier.weight(1f), color = TextColor, fontSize = 13.sp)
+                            Switch(
+                                checked = clientPrev,
+                                onCheckedChange = { ServerManager.updateClientPermissions(client.ip, client.customAllowModifications, it); selectedClientForDetails = ServerManager.connectedClients[client.ip] },
+                                colors = SwitchDefaults.colors(checkedThumbColor = Blue)
+                            )
+                        }
+                        
+                        Spacer(Modifier.height(24.dp))
+                        Text("DEVICE INFO", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f), letterSpacing = 1.sp)
+                        Spacer(Modifier.height(8.dp))
+                        if (client.reportedModel != null) {
+                            Text("Model: ${client.reportedModel}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextColor)
+                            Text("Platform: ${client.platform ?: "Unknown"}", fontSize = 11.sp, color = TextColor.copy(alpha = 0.6f))
+                            Spacer(Modifier.height(8.dp))
+                        }
+                        Text(client.userAgent, fontSize = 10.sp, color = TextColor.copy(alpha = 0.4f), lineHeight = 14.sp)
+                        
+                        Spacer(Modifier.height(32.dp))
+                        
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            NeumorphicButton(
+                                onClick = { 
+                                    ServerManager.toggleBlock(context, client.ip)
+                                    selectedClientForDetails = null
+                                }, 
+                                accentColor = Red, 
+                                modifier = Modifier.weight(1f),
+                                isDark = isDark
+                            ) {
+                                Text("BLOCK DEVICE", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                            NeumorphicButton(
+                                onClick = { selectedClientForDetails = null }, 
+                                accentColor = Blue, 
+                                modifier = Modifier.weight(1f),
+                                isDark = isDark
+                            ) {
+                                Text("CLOSE", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
+}
 
     private fun checkAllFilesAccess(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -638,6 +1103,31 @@ class MainActivity : ComponentActivity() {
 }
 
 // ─── Skeuomorphic (Neumorphic) UI Components ───────────────────────────────
+
+fun Modifier.neumorphicShadow(
+    shape: androidx.compose.ui.graphics.Shape,
+    lightShadowColor: Color,
+    darkShadowColor: Color,
+    isDark: Boolean
+) = this.drawBehind {
+    val shadowDistance = 4.dp.toPx()
+    val blurRadius = 8.dp.toPx()
+
+    drawIntoCanvas { canvas ->
+        val paint = androidx.compose.ui.graphics.Paint()
+        val frameworkPaint = paint.asFrameworkPaint()
+        
+        // Light shadow (top-left)
+        frameworkPaint.color = Color.Transparent.toArgb()
+        frameworkPaint.setShadowLayer(blurRadius, -shadowDistance, -shadowDistance, lightShadowColor.toArgb())
+        canvas.drawOutline(shape.createOutline(size, layoutDirection, this), paint)
+
+        // Dark shadow (bottom-right)
+        frameworkPaint.color = Color.Transparent.toArgb()
+        frameworkPaint.setShadowLayer(blurRadius, shadowDistance, shadowDistance, darkShadowColor.toArgb())
+        canvas.drawOutline(shape.createOutline(size, layoutDirection, this), paint)
+    }
+}
 
 @Composable
 fun NeumorphicCard(
@@ -710,30 +1200,7 @@ fun NeumorphicButton(
     }
 }
 
-fun Modifier.neumorphicShadow(
-    shape: androidx.compose.ui.graphics.Shape,
-    lightShadowColor: Color,
-    darkShadowColor: Color,
-    isDark: Boolean
-) = this.drawBehind {
-    val shadowDistance = 4.dp.toPx()
-    val blurRadius = 8.dp.toPx()
 
-    drawIntoCanvas { canvas ->
-        val paint = androidx.compose.ui.graphics.Paint()
-        val frameworkPaint = paint.asFrameworkPaint()
-        
-        // Light shadow (top-left)
-        frameworkPaint.color = Color.Transparent.toArgb()
-        frameworkPaint.setShadowLayer(blurRadius, -shadowDistance, -shadowDistance, lightShadowColor.toArgb())
-        canvas.drawOutline(shape.createOutline(size, layoutDirection, this), paint)
-
-        // Dark shadow (bottom-right)
-        frameworkPaint.color = Color.Transparent.toArgb()
-        frameworkPaint.setShadowLayer(blurRadius, shadowDistance, shadowDistance, darkShadowColor.toArgb())
-        canvas.drawOutline(shape.createOutline(size, layoutDirection, this), paint)
-    }
-}
 
 @Composable
 fun SocialIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, isDark: Boolean, onClick: () -> Unit) {
@@ -754,7 +1221,7 @@ fun generateQrBitmap(content: String): android.graphics.Bitmap? {
     try {
         val size = 512
         val hints = HashMap<com.google.zxing.EncodeHintType, Any>()
-        hints[com.google.zxing.EncodeHintType.MARGIN] = 1
+        hints[com.google.zxing.EncodeHintType.MARGIN] = 2 // Increased margin
         val bitMatrix = com.google.zxing.qrcode.QRCodeWriter().encode(
             content, com.google.zxing.BarcodeFormat.QR_CODE, size, size, hints
         )

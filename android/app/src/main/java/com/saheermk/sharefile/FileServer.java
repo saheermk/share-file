@@ -46,6 +46,19 @@ public class FileServer {
     private boolean allowPreviews = true;
     private String selectedInterface = "0.0.0.0";
     private final Set<String> sessions = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    private final Set<String> blockedIps = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    private final Map<String, Boolean> clientModifications = new ConcurrentHashMap<>();
+    private final Map<String, Boolean> clientPreviews = new ConcurrentHashMap<>();
+    private volatile long lastActivityTime = System.currentTimeMillis();
+
+    // TLS Settings
+    private boolean useHttps = false;
+    private String certPath = null;
+    private String certPassword = null;
+
+    // Strict Mode Settings
+    private boolean strictMode = false;
+    private final Set<String> allowedIps = new HashSet<>();
 
     public interface OnServerListener {
         void onStarted(String ip, int port);
@@ -55,6 +68,10 @@ public class FileServer {
         void onError(String msg);
 
         void onLog(String msg);
+
+        void onClientActive(String ip, String userAgent);
+
+        void onTelemetry(String ip, int battery, boolean isCharging, String model, String platform);
     }
 
     public FileServer(int port, File rootDir, Context context, OnServerListener listener) {
@@ -62,6 +79,15 @@ public class FileServer {
         this.rootDir = rootDir;
         this.context = context;
         this.listener = listener;
+        updateActivity();
+    }
+
+    public void updateActivity() {
+        this.lastActivityTime = System.currentTimeMillis();
+    }
+
+    public long getLastActivityTime() {
+        return lastActivityTime;
     }
 
     public void setSecurity(boolean enabled, String pwd) {
@@ -74,12 +100,59 @@ public class FileServer {
         this.allowPreviews = allowPrev;
     }
 
+    private boolean isBlocked(String ip) {
+        return blockedIps.contains(ip);
+    }
+
     public void setInterface(String ip) {
         this.selectedInterface = ip;
     }
 
+    public void setBlocked(String ip, boolean blocked) {
+        if (blocked)
+            blockedIps.add(ip);
+        else
+            blockedIps.remove(ip);
+    }
+
+    public void setClientPermission(String ip, String type, Boolean allowed) {
+        if (allowed == null) {
+            if ("mod".equals(type))
+                clientModifications.remove(ip);
+            else if ("prev".equals(type))
+                clientPreviews.remove(ip);
+        } else {
+            if ("mod".equals(type))
+                clientModifications.put(ip, allowed);
+            else if ("prev".equals(type))
+                clientPreviews.put(ip, allowed);
+        }
+    }
+
+    private boolean isModAllowed(String ip) {
+        return clientModifications.getOrDefault(ip, allowModifications);
+    }
+
+    private boolean isPrevAllowed(String ip) {
+        return clientPreviews.getOrDefault(ip, allowPreviews);
+    }
+
     public void setRootDir(File dir) {
         this.rootDir = dir;
+    }
+
+    public void setTls(boolean enable, String path, String password) {
+        this.useHttps = enable;
+        this.certPath = path;
+        this.certPassword = password;
+    }
+
+    public void setStrictMode(boolean enable, Set<String> allowedIps) {
+        this.strictMode = enable;
+        synchronized (this.allowedIps) {
+            this.allowedIps.clear();
+            this.allowedIps.addAll(allowedIps);
+        }
     }
 
     public void start() {
@@ -87,7 +160,29 @@ public class FileServer {
         new Thread(() -> {
             try {
                 InetAddress addr = InetAddress.getByName(selectedInterface);
-                serverSocket = new ServerSocket(port, 50, addr);
+                if (useHttps && certPath != null && certPassword != null) {
+                    try {
+                        java.security.KeyStore keyStore = java.security.KeyStore.getInstance("PKCS12");
+                        java.io.FileInputStream fis = new java.io.FileInputStream(certPath);
+                        keyStore.load(fis, certPassword.toCharArray());
+                        fis.close();
+
+                        javax.net.ssl.KeyManagerFactory kmf = javax.net.ssl.KeyManagerFactory
+                                .getInstance(javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm());
+                        kmf.init(keyStore, certPassword.toCharArray());
+
+                        javax.net.ssl.SSLContext sslContext = javax.net.ssl.SSLContext.getInstance("TLS");
+                        sslContext.init(kmf.getKeyManagers(), null, null);
+
+                        serverSocket = sslContext.getServerSocketFactory().createServerSocket(port, 50, addr);
+                    } catch (Exception e) {
+                        if (listener != null)
+                            listener.onError("TLS Init Error: " + e.getMessage());
+                        return;
+                    }
+                } else {
+                    serverSocket = new ServerSocket(port, 50, addr);
+                }
                 running = true;
                 if (listener != null)
                     listener.onStarted(selectedInterface.equals("0.0.0.0") ? getLocalIp() : selectedInterface, port);
@@ -123,9 +218,37 @@ public class FileServer {
     // ─── Request Handler ────────────────────────────────────────────────────
 
     private void handle(Socket socket) {
-        try {
-            InputStream rawIn = socket.getInputStream();
-            OutputStream rawOut = socket.getOutputStream();
+        String clientIp = socket.getInetAddress().getHostAddress();
+        try (InputStream input = socket.getInputStream();
+                OutputStream output = socket.getOutputStream()) {
+
+            // Strict Mode Check
+            if (strictMode) {
+                boolean isAllowed;
+                synchronized (allowedIps) {
+                    isAllowed = allowedIps.contains(clientIp);
+                }
+
+                if (!isAllowed) {
+                    log("STRICT: Blocked unauthorized IP: " + clientIp);
+                    // Read request headers first to avoid socket reset
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(input));
+                    String line = reader.readLine();
+                    if (line != null) {
+                        String html = WebInterface.buildApprovalPage(clientIp);
+                        sendResponse(output, "200 OK", "text/html", html.getBytes());
+                    }
+                    return;
+                }
+            }
+
+            if (isBlocked(clientIp)) {
+                sendResponse(output, "403 Forbidden", "text/plain", "IP Blocked".getBytes());
+                return;
+            }
+
+            InputStream rawIn = input;
+            OutputStream rawOut = output;
 
             // Read request line
             String requestLine = readLine(rawIn);
@@ -144,6 +267,12 @@ public class FileServer {
                             hLine.substring(colon + 1).trim());
                 }
             }
+
+            String ip = socket.getInetAddress().getHostAddress();
+            String ua = headers.get("user-agent");
+            if (ua == null)
+                ua = "Unknown Device";
+            listener.onClientActive(ip, ua);
 
             String[] parts = requestLine.split(" ");
             if (parts.length < 2) {
@@ -171,6 +300,7 @@ public class FileServer {
             if (listener != null)
                 listener.onLog(method + " " + rawPath);
             log("REQUEST: " + method + " " + rawPath);
+            updateActivity();
 
             // Special route: login
             if (path.equals("/login")) {
@@ -192,12 +322,16 @@ public class FileServer {
             }
 
             if ("GET".equalsIgnoreCase(method)) {
-                handleGet(rawOut, path, query);
+                handleGet(rawOut, path, query, clientIp);
             } else if ("POST".equalsIgnoreCase(method)) {
                 String ct = headers.getOrDefault("content-type", "");
                 String lenStr = headers.getOrDefault("content-length", "0");
                 int contentLength = Integer.parseInt(lenStr);
-                handlePost(rawOut, path, query, ct, rawIn, contentLength);
+                if (path.equals("/telemetry")) {
+                    handleTelemetry(rawOut, rawIn, contentLength, clientIp);
+                } else {
+                    handlePost(rawOut, path, query, ct, rawIn, contentLength, clientIp);
+                }
             } else {
                 sendError(rawOut, 405, "Method Not Allowed");
             }
@@ -254,7 +388,7 @@ public class FileServer {
 
     // ─── GET Handler ────────────────────────────────────────────────────────
 
-    private void handleGet(OutputStream out, String path, String query) throws IOException {
+    private void handleGet(OutputStream out, String path, String query, String clientIp) throws IOException {
         if (path.startsWith("/assets/")) {
             serveAsset(out, path.substring(8));
             return;
@@ -357,7 +491,8 @@ public class FileServer {
 
             if (target.isDirectory() && path.equals("/files")) {
                 sendHtml(out,
-                        WebInterface.buildDirListing(target, rootDir, relPath, allowModifications, allowPreviews));
+                        WebInterface.buildDirListing(target, rootDir, relPath, isModAllowed(clientIp),
+                                isPrevAllowed(clientIp)));
             } else if (target.isFile()) {
                 boolean forceDownload = "1".equals(getQueryParam(query, "dl"));
                 streamFile(out, target, forceDownload);
@@ -602,7 +737,11 @@ public class FileServer {
     // ─── POST Handler (file upload) ──────────────────────────────────────────
 
     private void handlePost(OutputStream out, String path, String query,
-            String contentType, InputStream body, int contentLength) throws IOException {
+            String contentType, InputStream body, int contentLength, String clientIp) throws IOException {
+        if (!isModAllowed(clientIp)) {
+            sendError(out, 403, "Modifications disabled for this client");
+            return;
+        }
         if (!contentType.startsWith("multipart/form-data")) {
             sendError(out, 400, "Expected multipart");
             return;
@@ -754,6 +893,16 @@ public class FileServer {
             log("RESPONSE: 302 Redirect to " + location);
         } catch (Exception ignored) {
         }
+    }
+
+    private void sendResponse(OutputStream out, String status, String contentType, byte[] data) throws IOException {
+        String header = "HTTP/1.1 " + status + "\r\n" +
+                "Content-Type: " + contentType + "\r\n" +
+                "Content-Length: " + data.length + "\r\n" +
+                "Connection: close\r\n\r\n";
+        out.write(header.getBytes("UTF-8"));
+        out.write(data);
+        out.flush();
     }
 
     private boolean isInsideRoot(File f) {
@@ -926,6 +1075,33 @@ public class FileServer {
             out.flush();
         } catch (Exception e) {
             sendError(out, 404, "Icon not found");
+        }
+    }
+
+    private void handleTelemetry(OutputStream out, InputStream in, int len, String ip) throws IOException {
+        byte[] bodyData = new byte[len];
+        int totalRead = 0;
+        while (totalRead < len) {
+            int r = in.read(bodyData, totalRead, len - totalRead);
+            if (r == -1)
+                break;
+            totalRead += r;
+        }
+        String json = new String(bodyData, "UTF-8");
+        try {
+            org.json.JSONObject obj = new org.json.JSONObject(json);
+            int battery = obj.optInt("batteryLevel", -1);
+            boolean charging = obj.optBoolean("isCharging", false);
+            String model = obj.optString("model", "Unknown");
+            String platform = obj.optString("platform", "Unknown");
+
+            if (listener != null) {
+                listener.onTelemetry(ip, battery, charging, model, platform);
+            }
+            out.write("HTTP/1.1 204 No Content\r\n".getBytes("UTF-8"));
+            out.write("Connection: close\r\n\r\n".getBytes("UTF-8"));
+        } catch (Exception e) {
+            sendError(out, 400, "Bad Request");
         }
     }
 }

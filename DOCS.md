@@ -1,37 +1,39 @@
-# SHTTPS Clone — Technical Documentation
+# Share File — Technical Documentation
 
 ---
 
 ## Architecture Overview
 
-This is a **pure native Android** app. No services, no NDK, no third-party HTTP libraries.
+This is a **pure native Android** app built with Jetpack Compose. It uses raw Java sockets for the HTTP engine to maintain a minimal binary footprint and maximum control.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   Android App                       │
-│  ┌─────────────────┐   ┌──────────────────────────┐ │
-│  │   MainActivity  │   │   FolderPicker.kt        │ │
-│  │  (Jetpack       │──▶│   (Compose folder tree)  │ │
-│  │   Compose UI)   │   └──────────────────────────┘ │
-│  └────────┬────────┘                                 │
-│           │ starts/stops                             │
-│  ┌────────▼────────────────────────────────────────┐ │
-│  │           FileServer.java                        │ │
-│  │   ServerSocket on port N                         │ │
-│  │   • GET /            → WebInterface directory    │ │
-│  │   • GET /?path=X     → Sub-folder listing        │ │
-│  │   • GET /download?file=X → File streaming        │ │
-│  │   • POST /upload?path=X  → Multipart save        │ │
-│  └────────┬────────────────────────────────────────┘ │
-│           │ generates HTML                           │
-│  ┌────────▼────────────────────────────────────────┐ │
-│  │           WebInterface.java                      │ │
-│  │   Builds SHTTPS-style HTML:                      │ │
-│  │   • Breadcrumb navigation                        │ │
-│  │   • Sortable file/folder table                   │ │
-│  │   • Upload form                                  │ │
-│  └─────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Android App                                   │
+│  ┌──────────────────────┐        ┌──────────────────────────┐           │
+│  │     MainActivity     │────────▶│      FolderPicker.kt     │           │
+│  │ (Neumorphic Dashboard)│        │   (Compose folder tree)  │           │
+│  └──────────┬───────────┘        └──────────────────────────┘           │
+│             │                                                           │
+│             ▼ starts/controls                                           │
+│  ┌──────────────────────┐        ┌──────────────────────────┐           │
+│  │  KeepAliveService.kt │────────▶│      FileServer.java     │           │
+│  │ (Foreground Service) │        │ (ServerSocket Pool Engine)│           │
+│  └──────────────────────┘        └──────────┬───────────────┘           │
+│                                             │                           │
+│             ┌───────────────────────────────┴───────────────┐           │
+│             │                                               │           │
+│  ┌──────────▼──────────┐                         ┌──────────▼────────┐  │
+│  │   WebInterface.java  │                         │   AppsManager Logic  │  │
+│  │ (HTML/JS Generator)  │                         │ (PackageManager API) │  │
+│  └──────────┬───────────┘                         └──────────┬────────┘  │
+│             │                                               │           │
+│  ┌──────────▼───────────────────────────────────────────────▼────────┐  │
+│  │                       HTTP API Layer                              │  │
+│  │  • /Files      → Explore filesystem with modern UI                │  │
+│  │  • /Apps       → Browse installed application APKs                │  │
+│  │  • /Security   → Session-based password protection                │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -40,89 +42,88 @@ This is a **pure native Android** app. No services, no NDK, no third-party HTTP 
 
 ### `FileServer.java`
 
-- **Thread model**: Main accept loop on a background thread. Each connection handled by a worker from a fixed-size thread pool (8 threads).
-- **Protocol**: HTTP/1.1 — handcrafted request parsing with `InputStream.read()`.
-- **Directory listing**: Delegates to `WebInterface.buildDirListing()`.
-- **File streaming**: `FileInputStream` → raw `OutputStream` with 64KB buffer.
-- **File upload**: Parses `multipart/form-data` by byte-array boundary detection. Saves raw bytes to disk preserving binary integrity.
-- **Security**: All paths are canonicalized and checked against `rootDir` to prevent path traversal.
+- **Thread model**: Single accept loop on a background thread. Each connection is handled by a worker from a fixed-size thread pool (8 threads).
+- **Protocol**: Handcrafted HTTP/1.1 engine using `InputStream.read()` for zero-dependency overhead.
+- **Secure Sockets**: Supports `SSLServerSocket` powered by `javax.net.ssl`.
+- **Session Cache**: Simple in-memory `Set<String>` for authenticated IP addresses (used when password protection is enabled).
 
 ### `WebInterface.java`
 
-- Stateless static methods — no templating engine.
-- Generates valid HTML5 with inline responsive CSS.
-- Breadcrumb built by splitting `relPath` and accumulating cumulative URL params.
-- Files sorted: directories first, then files, both case-insensitive alphabetical.
-
-### `FolderPicker.kt`
-
-- Pure Compose dialog — no `Intent`-based system picker.
-- Reads `java.io.File` directly (requires `MANAGE_EXTERNAL_STORAGE`).
-- Shows only directories (hides hidden folders).
-- Supports free navigation up/down the tree.
-- Returns the selected `File` to the caller via a lambda.
+- **Architecture**: Stateless static methods generating robust HTML5.
+- **Styling**: Inline CSS variables for Neumorphic components and dynamic theme switching.
+- **Logic**: Bundled ES6+ Javascript for search, sorting, and stateful selection mode.
 
 ### `MainActivity.kt`
 
-- Single Activity, single Composable (`ShttsApp`).
-- Permission check on every `onResume` via `Environment.isExternalStorageManager()`.
-- QR code generated from URL using **ZXing Core** (no ZXing UI dependency).
-- **QR Code Scanner**: Integrated with `com.journeyapps:zxing-android-embedded` to allow connecting to other network servers via URL detection.
-- Port and root path persisted to `SharedPreferences`.
+- **UI System**: Pure **Jetpack Compose** with custom Neumorphic implementation details (`neumorphicShadow` modifier).
+- **Network Discovery**: Iterates over `NetworkInterface.getNetworkInterfaces()` to discover all active local IPs (WLAN, Hotspot, Ethernet, Loopback).
+- **QR Ecosystem**:
+  - **Generator**: Uses ZXing Core to render the server URL as a bitmap.
+  - **Scanner**: Integrated header icon using `ScanContract` to facilitate device-to-device connection.
 
 ### `KeepAliveService.kt`
 
-- **Foreground Service**: Ensures the HTTP server remains active even when the app is backgrounded or the screen is off.
-- **Wakelocks**: Holds a `PowerManager.PARTIAL_WAKE_LOCK` and `WifiManager.WIFI_MODE_FULL_HIGH_PERF` to prevent the system from suspending the CPU and network stack during file transfers.
-- **Lifecycle**: Automatically started and bound to the "Start Server" toggle in `MainActivity.kt`.
+- **Foreground Service**: Holds a persistent notification to prevent the Android system from killing the server process.
+- **Wakelocks**:
+  - `PowerManager.PARTIAL_WAKE_LOCK`: Keeps the CPU running.
+  - `WifiManager.WIFI_MODE_FULL_HIGH_PERF`: Prevents Wi-Fi from entering low-power/sleep mode during transfers.
+
+---
+
+## Automation Logic
+
+### Auto Start on Boot
+
+The `BootReceiver` listens for the `ACTION_BOOT_COMPLETED` broadcast. When received, it checks the `auto_start_boot` preference and, if enabled, starts the `KeepAliveService`, which in turn initializes the HTTP engine.
+
+### Inactivity Shutdown
+
+The `KeepAliveService` runs a periodic check (every 1 minute). It compares the current time with `ServerManager.fileServer.lastActivityTime`. If the difference exceeds the user-defined threshold, the server and service are automatically stopped to conserve device resources.
 
 ---
 
 ## HTTP API Reference
 
-| Method | Path                          | Description               |
-| ------ | ----------------------------- | ------------------------- |
-| `GET`  | `/`                           | Root folder listing       |
-| `GET`  | `/?path=/Downloads`           | Sub-folder listing        |
-| `GET`  | `/download?file=/foo/bar.txt` | Download a file           |
-| `POST` | `/upload?path=/foo`           | Upload a file (multipart) |
+| Method | Path                   | Description                            |
+| ------ | ---------------------- | -------------------------------------- |
+| `GET`  | `/`                    | Redirects to Home (Files/Apps)         |
+| `GET`  | `/files?path=X`        | Directory listing for path X           |
+| `GET`  | `/download?file=X`     | Download file X (binary stream)        |
+| `POST` | `/upload?path=X`       | Multipart upload to directory X        |
+| `GET`  | `/apps`                | List all user-installed apps           |
+| `GET`  | `/download_app?pkg=X`  | Stream APK for package name X          |
+| `GET`  | `/zip?files=A,B,C`     | Stream multiple files as a ZIP archive |
+| `POST` | `/login`               | Submit password for access             |
+| `GET`  | `/mkdir?path=X&name=Y` | Create new directory Y in path X       |
+| `GET`  | `/delete?file=X`       | Delete a file or directory             |
 
 ---
 
-## Key Dependencies
+## Security & Access Control
 
-| Library                                             | Version      | Purpose                   |
-| --------------------------------------------------- | ------------ | ------------------------- |
-| `androidx.compose:compose-bom`                      | `2023.08.00` | Compose UI                |
-| `androidx.compose.material3:material3`              | BOM          | Material Design 3         |
-| `androidx.compose.material:material-icons-extended` | BOM          | All Material icons        |
-| `com.google.zxing:core`                             | `3.5.2`      | QR code bitmap generation |
-| `com.journeyapps:zxing-android-embedded`            | `4.3.0`      | QR code native scanning   |
-| `androidx.documentfile:documentfile`                | `1.0.1`      | Optional file abstraction |
+1. **Password Protection**: When enabled, the server intercepts all requests (except `/login` and assets) and serves a Neumorphic login page if the IP address is not in the authorized session list.
+2. **Path Traversal**: All input paths are canonicalized using `File.getCanonicalPath()` and validated to ensure they reside within the user-defined `rootDir`.
+3. **Modification Toggle**: Can be disabled to turn the server into a "Read-Only" portal, hiding all upload and file manipulation controls.
+4. **Preview Toggle**: Controls whether the web interface renders `<img>` and `<video>` tags directly or just shows generic icons (enhances privacy/performance).
+5. **Strict Approval Mode**:
+   - Implements an IP-based allowlist for maximum security.
+   - When active, the server serves a specialized "Access Request" page with a host-scannable QR code to any IP not in the allowlist.
+   - The host uses the Android app's built-in scanner to extract the client IP from the QR code and add it to the persistent `allowed_ips` set.
+6. **HTTPS (TLS) Encryption**:
+   - The app supports end-to-end encryption using standard TLS.
+   - Users must provide a **PKCS12 (.p12/.pfx)** certificate file and its corresponding password.
+   - When enabled, the server initializes an `SSLContext` to wrap the standard server socket, ensuring all traffic between the Android device and the browser is encrypted.
 
 ---
 
 ## Build Configuration
 
-```
+```gradle
 compileSdk  = 34
-minSdk      = 26      (Android 8.0+)
+minSdk      = 26      (Android 8.0 Oreo)
 targetSdk   = 34
-versionName = 3.0.4   (matches SHTTPS)
+versionName = 3.0.4
 ```
 
-**`gradle.properties`:**
-
-```
-org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
-```
-
-This prevents Gradle daemon from running out of heap when compiling Compose.
-
----
-
-## Security Notes
-
-- **Path traversal protection**: Every file path is checked with `File.getCanonicalPath()` to ensure it stays inside `rootDir`.
-- **No authentication**: This is a local network server — same as SHTTPS. Only use on trusted networks.
-- **No HTTPS**: Plain HTTP, same as SHTTPS. For encrypted sharing, set up a reverse proxy.
+**Memory Management**:
+The system is configured with `org.gradle.jvmargs=-Xmx2048m` in `gradle.properties` to handle complex Compose UI compilation without heap exhaustion.
