@@ -19,16 +19,18 @@ import java.util.Map;
  */
 public class WebInterface {
 
-    private static final String APP_LOGO = "/logo.png";
+    private static final String APP_LOGO = "/logo.png?v=3.0.6";
 
     private static final String TELEMETRY_JS = "<script>" +
             "async function sendTelemetry() {" +
             "  try {" +
             "    let batteryInfo = { level: null, charging: null };" +
-            "    if (navigator.getBattery) {" +
-            "      const battery = await navigator.getBattery();" +
-            "      batteryInfo = { level: Math.round(battery.level * 100), charging: battery.charging };" +
-            "    }" +
+            "    try {" +
+            "      if (navigator.getBattery) {" +
+            "        const battery = await navigator.getBattery();" +
+            "        batteryInfo = { level: Math.round(battery.level * 100), charging: battery.charging };" +
+            "      }" +
+            "    } catch (e) { /* battery api failed or blocked */ }" +
             "    let model = 'Unknown';" +
             "    let platform = 'Unknown';" +
             "    if (navigator.userAgentData) {" +
@@ -48,7 +50,8 @@ public class WebInterface {
             "    });" +
             "  } catch (e) { console.log('Telemetry error', e); }" +
             "}" +
-            "setTimeout(sendTelemetry, 1000);" +
+            "setInterval(sendTelemetry, 5000);" +
+            "sendTelemetry();" +
             "</script>";
 
     private static final String CSS = "<style>" +

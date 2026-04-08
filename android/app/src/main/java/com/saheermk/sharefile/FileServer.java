@@ -55,11 +55,6 @@ public class FileServer {
     private final Map<String, Boolean> clientPreviews = new ConcurrentHashMap<>();
     private volatile long lastActivityTime = System.currentTimeMillis();
 
-    // TLS Settings
-    private boolean useHttps = false;
-    private String certPath = null;
-    private String certPassword = null;
-
     // Strict Mode Settings
     private boolean strictMode = false;
     private final Set<String> allowedIps = new HashSet<>();
@@ -145,12 +140,6 @@ public class FileServer {
         this.rootDir = dir;
     }
 
-    public void setTls(boolean enable, String path, String password) {
-        this.useHttps = enable;
-        this.certPath = path;
-        this.certPassword = password;
-    }
-
     public void setStrictMode(boolean enable, Set<String> allowedIps) {
         this.strictMode = enable;
         synchronized (this.allowedIps) {
@@ -162,34 +151,39 @@ public class FileServer {
     public void start() {
         pool = Executors.newFixedThreadPool(8);
         new Thread(() -> {
-            try {
-                InetAddress addr = InetAddress.getByName(selectedInterface);
-                if (useHttps && certPath != null && certPassword != null) {
-                    try {
-                        java.security.KeyStore keyStore = java.security.KeyStore.getInstance("PKCS12");
-                        java.io.FileInputStream fis = new java.io.FileInputStream(certPath);
-                        keyStore.load(fis, certPassword.toCharArray());
-                        fis.close();
+            int currentPort = port;
+            int attempts = 0;
+            boolean success = false;
 
-                        javax.net.ssl.KeyManagerFactory kmf = javax.net.ssl.KeyManagerFactory
-                                .getInstance(javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm());
-                        kmf.init(keyStore, certPassword.toCharArray());
-
-                        javax.net.ssl.SSLContext sslContext = javax.net.ssl.SSLContext.getInstance("TLS");
-                        sslContext.init(kmf.getKeyManagers(), null, null);
-
-                        serverSocket = sslContext.getServerSocketFactory().createServerSocket(port, 50, addr);
-                    } catch (Exception e) {
-                        if (listener != null)
-                            listener.onError("TLS Init Error: " + e.getMessage());
-                        return;
-                    }
-                } else {
-                    serverSocket = new ServerSocket(port, 50, addr);
+            while (attempts < 10 && !success) {
+                try {
+                    InetAddress addr = InetAddress.getByName(selectedInterface);
+                    serverSocket = new ServerSocket();
+                    serverSocket.setReuseAddress(true);
+                    serverSocket.bind(new InetSocketAddress(addr, currentPort), 50);
+                    success = true;
+                } catch (java.net.BindException e) {
+                    log("Port " + currentPort + " busy, trying next...");
+                    currentPort++;
+                    attempts++;
+                } catch (Exception e) {
+                    if (listener != null)
+                        listener.onError("Server Init Error: " + e.getMessage());
+                    return;
                 }
+            }
+
+            if (!success) {
+                if (listener != null)
+                    listener.onError("Cannot bind to any port after 10 attempts.");
+                return;
+            }
+
+            try {
                 running = true;
                 if (listener != null)
-                    listener.onStarted(selectedInterface.equals("0.0.0.0") ? getLocalIp() : selectedInterface, port);
+                    listener.onStarted(selectedInterface.equals("0.0.0.0") ? getLocalIp() : selectedInterface,
+                            currentPort);
                 while (running) {
                     try {
                         Socket client = serverSocket.accept();
@@ -199,9 +193,9 @@ public class FileServer {
                             listener.onError(e.getMessage());
                     }
                 }
-            } catch (IOException e) {
+            } catch (Exception e) {
                 if (listener != null)
-                    listener.onError("Cannot bind to port " + port + ": " + e.getMessage());
+                    listener.onError("Runtime Error: " + e.getMessage());
             }
         }, "SHTTPS-accept").start();
     }

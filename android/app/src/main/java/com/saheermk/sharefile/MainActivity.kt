@@ -17,6 +17,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -46,10 +47,9 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.ui.res.vectorResource
-import androidx.compose.ui.graphics.vector.ImageVector
-import java.net.InetAddress
 import java.net.NetworkInterface
-import java.util.*
+import java.net.InetAddress
+import java.util.Collections
 import kotlin.collections.ArrayList
 
 class MainActivity : ComponentActivity() {
@@ -111,37 +111,15 @@ class MainActivity : ComponentActivity() {
         var showUrlActions by remember { mutableStateOf(false) }
         var selectedClientForDetails by remember { mutableStateOf<ClientInfo?>(null) }
 
-        // HTTPS States
-        var useHttps by remember { mutableStateOf(prefs.getBoolean("use_https", false)) }
-        var certPath by remember { mutableStateOf(prefs.getString("cert_path", "")!!) }
-        var certPass by remember { mutableStateOf(prefs.getString("cert_password", "")!!) }
-        var certPassVisible by remember { mutableStateOf(false) }
-
-        val certPickerLauncher = rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.GetContent()) { uri ->
-            uri?.let {
-                // Get absolute path (simplified for internal/accessible storage)
-                // In a real app, you'd copy this to internal storage. Here we'll try to use the path if possible.
-                // For simplicity, we'll ask user to provide a path or use a helper to resolve it.
-                // For now, let's assume we can get a path or just use the URI string (though File needs path).
-                // Actually, let's just use a text field for the path for now to be safe, 
-                // OR copy the file to internal storage.
-                
-                try {
-                    val inputStream = context.contentResolver.openInputStream(it)
-                    val file = File(context.filesDir, "server_cert.p12")
-                    val outputStream = java.io.FileOutputStream(file)
-                    inputStream?.copyTo(outputStream)
-                    inputStream?.close()
-                    outputStream.close()
-                    
-                    certPath = file.absolutePath
-                    prefs.edit().putString("cert_path", certPath).apply()
-                    Toast.makeText(context, "Certificate imported", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Toast.makeText(context, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
-                }
+        
+        // Periodic Status Refresh
+        LaunchedEffect(Unit) {
+            while(true) {
+                kotlinx.coroutines.delay(2000)
+                ServerManager.refreshConnectionStatuses()
             }
         }
+
 
         val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
             if (result.contents != null) {
@@ -161,6 +139,7 @@ class MainActivity : ComponentActivity() {
         }
 
         LaunchedEffect(Unit) {
+
             ServerManager.init(context)
             hasPermission = checkAllFilesAccess()
             
@@ -179,6 +158,22 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             } catch (e: Exception) { logs.add("Iface Discovery Error: ${e.message}") }
+        }
+
+        DisposableEffect(Unit) {
+            ServerManager.listener = object : FileServer.OnServerListener {
+                override fun onStarted(ip: String, actualPort: Int) {
+                    port = actualPort.toString()
+                }
+                override fun onStopped() {}
+                override fun onError(msg: String) {}
+                override fun onLog(msg: String) {}
+                override fun onClientActive(ip: String, ua: String) {}
+                override fun onTelemetry(ip: String, bat: Int, ch: Boolean, mod: String, plat: String) {}
+            }
+            onDispose {
+                ServerManager.listener = null
+            }
         }
 
         MaterialTheme {
@@ -672,80 +667,8 @@ class MainActivity : ComponentActivity() {
                                 }
 
                                 Spacer(Modifier.height(20.dp))
-                                Divider(color = TextColor.copy(alpha = 0.05f))
-                                Spacer(Modifier.height(20.dp))
+                                // Done removing HTTPS
 
-                                // HTTPS Section
-                                Text("HTTPS (TLS) ENCRYPTION", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
-                                Spacer(Modifier.height(16.dp))
-
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text("Enable HTTPS", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextColor)
-                                        Text("Use secure encrypted connection", fontSize = 11.sp, color = TextColor.copy(alpha = 0.6f))
-                                    }
-                                    Switch(
-                                        checked = useHttps,
-                                        onCheckedChange = {
-                                            if (it && certPath.isEmpty()) {
-                                                Toast.makeText(context, "Import a certificate first", Toast.LENGTH_SHORT).show()
-                                            } else {
-                                                useHttps = it
-                                                prefs.edit().putBoolean("use_https", it).apply()
-                                            }
-                                        },
-                                        colors = SwitchDefaults.colors(checkedThumbColor = Blue)
-                                    )
-                                }
-
-                                if (useHttps || certPath.isNotEmpty()) {
-                                    Spacer(Modifier.height(16.dp))
-                                    NeumorphicCard(isDark = isDark, bgColor = if (isDark) Color(0xFF25282D) else Color.White.copy(alpha = 0.5f)) {
-                                        Column {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Text("Certificate File", fontSize = 11.sp, color = TextColor.copy(alpha = 0.5f))
-                                                    Text(if (certPath.isNotEmpty()) File(certPath).name else "None selected", fontSize = 13.sp, color = TextColor, fontWeight = FontWeight.Medium)
-                                                }
-                                                IconButton(onClick = { certPickerLauncher.launch("application/x-pkcs12") }) {
-                                                    Icon(Icons.Default.UploadFile, null, tint = Blue)
-                                                }
-                                            }
-                                            
-                                            if (certPath.isNotEmpty()) {
-                                                Spacer(Modifier.height(12.dp))
-                                                OutlinedTextField(
-                                                    value = certPass,
-                                                    onValueChange = {
-                                                        certPass = it
-                                                        prefs.edit().putString("cert_password", it).apply()
-                                                    },
-                                                    label = { Text("Certificate Password", fontSize = 10.sp) },
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    singleLine = true,
-                                                    visualTransformation = if (certPassVisible) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                                                    trailingIcon = {
-                                                        IconButton(onClick = { certPassVisible = !certPassVisible }) {
-                                                            Icon(if (certPassVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff, null, tint = Blue, modifier = Modifier.size(18.dp))
-                                                        }
-                                                    },
-                                                    colors = OutlinedTextFieldDefaults.colors(
-                                                        focusedTextColor = TextColor,
-                                                        unfocusedTextColor = TextColor,
-                                                        focusedBorderColor = Blue,
-                                                        unfocusedBorderColor = TextColor.copy(alpha = 0.1f)
-                                                    ),
-                                                    shape = RoundedCornerShape(8.dp)
-                                                )
-                                            }
-                                        }
-                                    }
-                                    
-                                    if (useHttps) {
-                                        Spacer(Modifier.height(8.dp))
-                                        Text("Restart server to apply HTTPS", fontSize = 10.sp, color = Blue.copy(alpha = 0.8f))
-                                    }
-                                }
                             }
                         }
 
@@ -826,48 +749,56 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                 } else {
-                                    items(ServerManager.connectedClients.values.toList()) { client ->
-                                        NeumorphicCard(
-                                            isDark = isDark,
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable { selectedClientForDetails = client }
-                                        ) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                modifier = Modifier.fillMaxWidth()
-                                            ) {
-                                                Box(
-                                                    Modifier
-                                                        .size(44.dp)
-                                                        .background(Blue.copy(alpha = 0.1f), CircleShape),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    Icon(
-                                                        when {
-                                                            client.deviceName.contains("PC") || client.deviceName.contains("Windows") || client.deviceName.contains("Mac") || client.deviceName.contains("Linux") -> Icons.Default.Computer
-                                                            else -> Icons.Default.Smartphone
-                                                        },
-                                                        null,
-                                                        tint = Blue,
-                                                        modifier = Modifier.size(20.dp)
-                                                    )
-                                                }
-                                                Spacer(Modifier.width(16.dp))
-                                                Column(Modifier.weight(1f)) {
-                                                    Text(client.deviceName, fontWeight = FontWeight.Bold, color = TextColor, fontSize = 14.sp)
-                                                    Text(client.ip, fontSize = 12.sp, color = TextColor.copy(alpha = 0.6f))
-                                                }
-                                                Box(
-                                                    modifier = Modifier
-                                                        .background(Green.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
-                                                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                                                ) {
-                                                    Text("ACTIVE", color = Green, fontSize = 9.sp, fontWeight = FontWeight.Black)
-                                                }
-                                            }
-                                        }
-                                    }
+                                     items(ServerManager.connectedClients.values.toList()) { client ->
+                                         NeumorphicCard(
+                                             isDark = isDark,
+                                             modifier = Modifier
+                                                 .fillMaxWidth()
+                                                 .clickable { selectedClientForDetails = client }
+                                         ) {
+                                             Row(
+                                                 verticalAlignment = Alignment.CenterVertically,
+                                                 modifier = Modifier.fillMaxWidth()
+                                             ) {
+                                                 Box(
+                                                     Modifier
+                                                         .size(44.dp)
+                                                         .background(Blue.copy(alpha = 0.1f), CircleShape),
+                                                     contentAlignment = Alignment.Center
+                                                 ) {
+                                                     Icon(
+                                                         when {
+                                                             client.deviceName.contains("PC") || client.deviceName.contains("Windows") || client.deviceName.contains("Mac") || client.deviceName.contains("Linux") -> Icons.Default.Computer
+                                                             else -> Icons.Default.Smartphone
+                                                         },
+                                                         null,
+                                                         tint = Blue,
+                                                         modifier = Modifier.size(20.dp)
+                                                     )
+                                                 }
+                                                 Spacer(Modifier.width(16.dp))
+                                                 Column(Modifier.weight(1f)) {
+                                                     Text(client.deviceName, fontWeight = FontWeight.Bold, color = TextColor, fontSize = 14.sp)
+                                                     val lastSeen = if (client.isOnline) "Just now" else {
+                                                         val diff = (System.currentTimeMillis() - client.lastActive) / 1000
+                                                         when {
+                                                             diff < 60 -> "${diff}s ago"
+                                                             diff < 3600 -> "${diff / 60}m ago"
+                                                             else -> "${diff / 3600}h ago"
+                                                         }
+                                                     }
+                                                     Text("${client.ip} • $lastSeen", fontSize = 11.sp, color = TextColor.copy(alpha = 0.6f))
+                                                 }
+                                                 Box(
+                                                     modifier = Modifier
+                                                         .background((if (client.isOnline) Green else Red).copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+                                                         .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                 ) {
+                                                     Text(if (client.isOnline) "ACTIVE" else "OFFLINE", color = if (client.isOnline) Green else Red, fontSize = 9.sp, fontWeight = FontWeight.Black)
+                                                 }
+                                             }
+                                         }
+                                     }
                                 }
 
                                 // ─── Blocked Section ─────────────────────────────────────────
@@ -1016,9 +947,9 @@ class MainActivity : ComponentActivity() {
                         val clientPrev = client.customAllowPreviews ?: allowPreviews
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            val batteryText = if (client.batteryLevel != null) {
+                            val batteryText = if (client.batteryLevel != null && client.batteryLevel != -1) {
                                 "${client.batteryLevel}%" + (if (client.isCharging == true) " (Charging)" else "")
-                            } else "Unknown"
+                            } else "N/A"
                             Text("Battery Status", modifier = Modifier.weight(1f), color = TextColor, fontSize = 13.sp)
                             Text(batteryText, fontWeight = FontWeight.Bold, color = Blue, fontSize = 13.sp)
                         }

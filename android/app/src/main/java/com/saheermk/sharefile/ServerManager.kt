@@ -18,7 +18,9 @@ data class ClientInfo(
     var isCharging: Boolean? = null,
     var reportedModel: String? = null,
     var platform: String? = null
-)
+) {
+    val isOnline: Boolean get() = (System.currentTimeMillis() - lastActive) < 15000 // 15 seconds threshold
+}
 
 /**
  * Singleton to manage the FileServer instance across MainActivity and KeepAliveService.
@@ -34,6 +36,7 @@ object ServerManager {
     val blockedIps = mutableStateMapOf<String, Boolean>() // IP -> true
     val archivedDeviceNames = mutableStateMapOf<String, String>() // IP -> DeviceName (last known)
     val customClientSettings = mutableStateMapOf<String, Pair<Boolean?, Boolean?>>() // IP -> (ModAllowed?, PrevAllowed?)
+    var listener: FileServer.OnServerListener? = null
 
     fun init(context: Context) {
         val prefs = context.getSharedPreferences("shttps_prefs", Context.MODE_PRIVATE)
@@ -112,16 +115,17 @@ object ServerManager {
         val allowPreviews = prefs.getBoolean("allow_previews", true)
         val selectedInterface = prefs.getString("selected_interface", "0.0.0.0") ?: "0.0.0.0"
         
-        val useHttps = prefs.getBoolean("use_https", false)
-        val certPath = prefs.getString("cert_path", "") ?: ""
-        val certPass = prefs.getString("cert_password", "") ?: ""
 
         val internalListener = object : FileServer.OnServerListener {
             override fun onStarted(ip: String, port: Int) {
-                serverUrl = if (useHttps) "https://$ip:$port" else "http://$ip:$port"
+                // We no longer permanently save the auto-shifted port here.
+                // The UI will still show the active port via the GlobalListener.
+
+                serverUrl = "http://$ip:$port"
                 isRunning = true
                 logs.add("Started @ $serverUrl")
                 listener?.onStarted(ip, port)
+                ServerManager.listener?.onStarted(ip, port)
             }
 
             override fun onStopped() {
@@ -129,16 +133,19 @@ object ServerManager {
                 serverUrl = ""
                 logs.add("Server down")
                 listener?.onStopped()
+                ServerManager.listener?.onStopped()
             }
 
             override fun onError(msg: String) {
                 logs.add("ERR: $msg")
                 listener?.onError(msg)
+                ServerManager.listener?.onError(msg)
             }
 
             override fun onLog(msg: String) {
                 logs.add(msg)
                 listener?.onLog(msg)
+                ServerManager.listener?.onLog(msg)
             }
 
             override fun onClientActive(ip: String, userAgent: String) {
@@ -159,25 +166,26 @@ object ServerManager {
                         customAllowModifications = custom?.first,
                         customAllowPreviews = custom?.second
                     )
-                    logs.add("New client: $device ($ip)")
+                    logs.add("Client connected: $device ($ip)")
                 } else {
-                    connectedClients[ip] = existing.copy(
-                        lastActive = System.currentTimeMillis(),
-                        customAllowModifications = custom?.first,
-                        customAllowPreviews = custom?.second
-                    )
+                    existing.lastActive = System.currentTimeMillis()
+                    // Map update to trigger recomposition
+                    connectedClients[ip] = existing.copy()
                 }
+                ServerManager.listener?.onClientActive(ip, userAgent)
             }
 
-            override fun onTelemetry(ip: String, battery: Int, isCharging: Boolean, model: String, platform: String) {
+            override fun onTelemetry(ip: String, batteryLevel: Int, isCharging: Boolean, model: String, platform: String) {
                 connectedClients[ip]?.let {
                     connectedClients[ip] = it.copy(
-                        batteryLevel = if (battery >= 0) battery else it.batteryLevel,
+                        lastActive = System.currentTimeMillis(),
+                        batteryLevel = batteryLevel,
                         isCharging = isCharging,
                         reportedModel = if (model != "Unknown") model else it.reportedModel,
                         platform = if (platform != "Unknown") platform else it.platform
                     )
                 }
+                ServerManager.listener?.onTelemetry(ip, batteryLevel, isCharging, model, platform)
             }
         }
 
@@ -188,9 +196,6 @@ object ServerManager {
             setInterface(selectedInterface)
             logs.add("Start: Strict=${strictMode}, Allowed Count=${allowedIps.size}")
             setStrictMode(strictMode, allowedIps.toSet())
-            if (useHttps && certPath.isNotEmpty()) {
-                setTls(true, certPath, certPass)
-            }
             start()
         }
     }
@@ -254,5 +259,20 @@ object ServerManager {
         val prefs = context.getSharedPreferences("shttps_prefs", Context.MODE_PRIVATE)
         prefs.edit().putBoolean("strict_mode", enabled).apply()
         fileServer?.setStrictMode(enabled, allowedIps.toSet())
+    }
+
+    /**
+     * Called by UI to force-refresh online status of clients.
+     */
+    fun refreshConnectionStatuses() {
+        val now = System.currentTimeMillis()
+        val toPrune = mutableListOf<String>()
+        
+        connectedClients.forEach { (ip, info) ->
+            // If offline for more than 5 minutes, we might want to prune
+            // but for now, just toggling isOnline is enough for UI.
+            // To trigger recomposition of the map entry, we re-set it.
+            connectedClients[ip] = info.copy() 
+        }
     }
 }
