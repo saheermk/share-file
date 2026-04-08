@@ -246,9 +246,10 @@ class MainActivity : ComponentActivity() {
                                     .clickable { 
                                         scanLauncher.launch(ScanOptions().apply {
                                             setDesiredBarcodeFormats(ScanOptions.ALL_CODE_TYPES)
-                                            setPrompt("Align QR code inside the frame")
+                                            setPrompt("Scan a client's IP to grant access")
                                             setBeepEnabled(true)
-                                            setOrientationLocked(false)
+                                            setOrientationLocked(true) // Force the orientation defined in Manifest
+                                            setCaptureActivity(CustomCaptureActivity::class.java)
                                             setBarcodeImageEnabled(true)
                                         })
                                     },

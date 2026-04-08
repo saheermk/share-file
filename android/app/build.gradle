@@ -3,6 +3,11 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// Helper to generate a unique, increasing 32-bit safe version code
+def generateVersionCode() {
+    return (System.currentTimeMillis() / 1000).toInteger()
+}
+
 android {
     namespace 'com.saheermk.sharefile'
     compileSdk 34
@@ -11,8 +16,8 @@ android {
         applicationId "com.saheermk.sharefile"
         minSdk 26
         targetSdk 34
-        versionCode 3
-        versionName "3.0.5"
+        versionCode generateVersionCode()
+        versionName "3.0.6"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -20,10 +25,22 @@ android {
         }
     }
 
+    signingConfigs {
+        release {
+            // Template for production signing. 
+            // Replace with your real keystore path and passwords.
+            // storeFile file('release-key.jks')
+            // storePassword 'your_password'
+            // keyAlias 'your_alias'
+            // keyPassword 'your_password'
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Use release config if available, otherwise fallback to debug signature
             signingConfig signingConfigs.debug
         }
     }

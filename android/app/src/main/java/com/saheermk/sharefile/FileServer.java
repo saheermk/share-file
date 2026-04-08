@@ -6,6 +6,10 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.Rect;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.util.Log;
@@ -404,6 +408,16 @@ public class FileServer {
             return;
         }
 
+        if (path.equals("/check_auth")) {
+            boolean isAllowed;
+            synchronized (allowedIps) {
+                isAllowed = allowedIps.contains(clientIp);
+            }
+            String status = isAllowed ? "authorized" : "pending";
+            sendResponse(out, "200 OK", "text/plain", status.getBytes("UTF-8"));
+            return;
+        }
+
         // --- New Routing ---
         if (path.equals("/")) {
             sendHtml(out, WebInterface.buildLandingPage());
@@ -417,6 +431,11 @@ public class FileServer {
 
         if (path.equals("/download_app")) {
             handleAppDownload(out, query);
+            return;
+        }
+
+        if (path.equals("/logo.png")) {
+            handleAppIcon(out, "pkg=" + context.getPackageName() + "&circular=true");
             return;
         }
 
@@ -1042,6 +1061,7 @@ public class FileServer {
 
     private void handleAppIcon(OutputStream out, String query) throws IOException {
         String pkg = getQueryParam(query, "pkg");
+        boolean circular = "true".equals(getQueryParam(query, "circular"));
         if (pkg == null) {
             sendError(out, 400, "Missing package name");
             return;
@@ -1050,7 +1070,7 @@ public class FileServer {
             PackageManager pm = context.getPackageManager();
             Drawable icon = pm.getApplicationIcon(pkg);
             Bitmap bitmap;
-            if (icon instanceof BitmapDrawable) {
+            if (icon instanceof BitmapDrawable && !circular) {
                 bitmap = ((BitmapDrawable) icon).getBitmap();
             } else {
                 int w = icon.getIntrinsicWidth() > 0 ? icon.getIntrinsicWidth() : 128;
@@ -1059,6 +1079,19 @@ public class FileServer {
                 Canvas canvas = new Canvas(bitmap);
                 icon.setBounds(0, 0, canvas.getWidth(), canvas.getHeight());
                 icon.draw(canvas);
+
+                if (circular) {
+                    Bitmap output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                    Canvas canvasMask = new Canvas(output);
+                    final Paint paint = new Paint();
+                    final Rect rect = new Rect(0, 0, w, h);
+                    paint.setAntiAlias(true);
+                    canvasMask.drawARGB(0, 0, 0, 0);
+                    canvasMask.drawCircle(w / 2f, h / 2f, w / 2f, paint);
+                    paint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_IN));
+                    canvasMask.drawBitmap(bitmap, rect, rect, paint);
+                    bitmap = output;
+                }
             }
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos);
