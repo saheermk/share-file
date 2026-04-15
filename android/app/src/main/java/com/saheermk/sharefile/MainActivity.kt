@@ -265,7 +265,12 @@ class MainActivity : ComponentActivity() {
                                     },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(if (isDark) "☀️" else "🌙", fontSize = 18.sp)
+                                Icon(
+                                    if (isDark) Icons.Default.LightMode else Icons.Default.DarkMode,
+                                    contentDescription = "Toggle Theme",
+                                    tint = if (isDark) Color(0xFFFFD600) else Color(0xFF303F9F),
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                         }
                     }
@@ -355,6 +360,19 @@ class MainActivity : ComponentActivity() {
                                             Box(Modifier.size(8.dp).background(if (ServerManager.isRunning) Green else Red, CircleShape))
                                             Spacer(Modifier.width(8.dp))
                                             Text(if (ServerManager.isRunning) "Running" else "Stopped", fontWeight = FontWeight.Bold, color = TextColor)
+                                            if (ServerManager.isRunning) {
+                                                Spacer(Modifier.width(12.dp))
+                                                Text(
+                                                    "Logs",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Blue,
+                                                    modifier = Modifier
+                                                        .clickable { currentPage = "logs" }
+                                                        .border(1.dp, Blue.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
+                                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                )
+                                            }
                                         }
                                     }
                                     // Port Input
@@ -423,7 +441,7 @@ class MainActivity : ComponentActivity() {
                                 ) {
                                     Icon(if (ServerManager.isRunning) Icons.Default.PowerSettingsNew else Icons.Default.PlayArrow, null)
                                     Spacer(Modifier.width(12.dp))
-                                    Text(if (ServerManager.isRunning) "STOP SERVER" else "START SERVER", fontWeight = FontWeight.Black)
+                                    Text(if (ServerManager.isRunning) "STOP" else "START", fontWeight = FontWeight.Black)
                                 }
                             }
                         }
@@ -501,9 +519,52 @@ class MainActivity : ComponentActivity() {
                                     )
                                 }
 
-                                Spacer(Modifier.height(16.dp))
-                                Divider(color = TextColor.copy(alpha = 0.05f))
-                                Spacer(Modifier.height(16.dp))
+                                 Spacer(Modifier.height(16.dp))
+                                 Divider(color = TextColor.copy(alpha = 0.05f))
+                                 Spacer(Modifier.height(16.dp))
+
+                                 // Max Connections
+                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                     Column(Modifier.weight(1f)) {
+                                         Text("Max Connections", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextColor)
+                                         Text("Limit simultaneous device access", fontSize = 11.sp, color = TextColor.copy(alpha = 0.6f))
+                                     }
+                                     
+                                     var connExpanded by remember { mutableStateOf(false) }
+                                     Box {
+                                         Text(
+                                             text = if (ServerManager.maxConnections == 0) "Unlimited" else ServerManager.maxConnections.toString(),
+                                             color = Blue,
+                                             fontWeight = FontWeight.Bold,
+                                             fontSize = 14.sp,
+                                             modifier = Modifier
+                                                 .clickable { connExpanded = true }
+                                                 .border(1.dp, Blue.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                                                 .padding(horizontal = 12.dp, vertical = 6.dp)
+                                         )
+                                         DropdownMenu(
+                                             expanded = connExpanded,
+                                             onDismissRequest = { connExpanded = false },
+                                             modifier = Modifier.background(if (isDark) Color(0xFF25282D) else Color.White)
+                                         ) {
+                                             val options = (1..10).map { it.toString() } + "Unlimited"
+                                             options.forEach { opt ->
+                                                 val value = if (opt == "Unlimited") 0 else opt.toInt()
+                                                 DropdownMenuItem(
+                                                     text = { Text(opt, color = TextColor) },
+                                                     onClick = {
+                                                         ServerManager.updateMaxConnections(context, value)
+                                                         connExpanded = false
+                                                     }
+                                                 )
+                                             }
+                                         }
+                                     }
+                                 }
+
+                                 Spacer(Modifier.height(16.dp))
+                                 Divider(color = TextColor.copy(alpha = 0.05f))
+                                 Spacer(Modifier.height(16.dp))
                                 
                                 // Password Toggle
                                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -672,22 +733,6 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        // ─── Activity Log ─────────────────────────────────────────────────
-                        item {
-                            NeumorphicCard(bgColor = if (isDark) Color(0xFF121212) else Color(0xFFF1F3F4), isDark = isDark) {
-                                Text("REMOTE ACTIVITY", fontSize = 10.sp, fontWeight = FontWeight.Black, color = TextColor.copy(alpha = 0.5f))
-                                Spacer(Modifier.height(12.dp))
-                                Box(modifier = Modifier.fillMaxWidth().height(140.dp)) {
-                                    val listState = rememberLazyListState()
-                                    LaunchedEffect(logs.size) { if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1) }
-                                    LazyColumn(state = listState) {
-                                        items(logs) { entry ->
-                                            Text("> $entry", color = Green, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(vertical = 2.dp))
-                                        }
-                                    }
-                                }
-                            }
-                        }
 
                         item { Spacer(Modifier.height(20.dp)) }
                     }
@@ -836,6 +881,58 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             }
+                        }
+                    } else if (currentPage == "logs") {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 24.dp, vertical = 8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "SYSTEM LOGS",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = TextColor.copy(alpha = 0.5f),
+                                    letterSpacing = 1.sp
+                                )
+                                Text(
+                                    "Back",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Blue,
+                                    modifier = Modifier.clickable { currentPage = "home" }
+                                )
+                            }
+                            
+                            Spacer(Modifier.height(16.dp))
+                            
+                            NeumorphicCard(
+                                bgColor = if (isDark) Color(0xFF0F0F0F) else Color(0xFFF1F3F4),
+                                isDark = isDark,
+                                modifier = Modifier.fillMaxSize().weight(1f)
+                            ) {
+                                Box(modifier = Modifier.fillMaxSize()) {
+                                    val listState = rememberLazyListState()
+                                    LaunchedEffect(logs.size) { if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1) }
+                                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                                        items(logs) { entry ->
+                                            Text(
+                                                "> $entry",
+                                                color = Green,
+                                                fontSize = 12.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                modifier = Modifier.padding(vertical = 4.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(16.dp))
                         }
                     }
 
@@ -1004,13 +1101,13 @@ class MainActivity : ComponentActivity() {
                             ) {
                                 Text("CLOSE", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             }
-                        }
+                         }
                     }
                 }
             }
         }
     }
-}
+    }
 
     private fun checkAllFilesAccess(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -1131,8 +1228,6 @@ fun NeumorphicButton(
         }
     }
 }
-
-
 
 @Composable
 fun SocialIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, isDark: Boolean, onClick: () -> Unit) {

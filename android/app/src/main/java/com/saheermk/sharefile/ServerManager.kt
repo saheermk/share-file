@@ -31,6 +31,7 @@ object ServerManager {
     val connectedClients = mutableStateMapOf<String, ClientInfo>() // IP to ClientInfo
     var isRunning by mutableStateOf(false)
     var serverUrl by mutableStateOf("")
+    var maxConnections by mutableIntStateOf(0)
     var strictMode by mutableStateOf(false)
     val allowedIps = mutableStateListOf<String>()
     val blockedIps = mutableStateMapOf<String, Boolean>() // IP -> true
@@ -51,6 +52,9 @@ object ServerManager {
         val allowedSet = prefs.getStringSet("allowed_ips", emptySet()) ?: emptySet()
         allowedIps.clear()
         allowedIps.addAll(allowedSet)
+
+        // Load Max Connections
+        maxConnections = prefs.getInt("max_connections", 0)
         
         // Load Archived Device Names
         val archivedJson = prefs.getString("archived_devices", "{}") ?: "{}"
@@ -114,6 +118,7 @@ object ServerManager {
         val allowModifications = prefs.getBoolean("allow_modifications", true)
         val allowPreviews = prefs.getBoolean("allow_previews", true)
         val selectedInterface = prefs.getString("selected_interface", "0.0.0.0") ?: "0.0.0.0"
+        val maxConn = prefs.getInt("max_connections", 0)
         
 
         val internalListener = object : FileServer.OnServerListener {
@@ -189,12 +194,14 @@ object ServerManager {
             }
         }
 
+        logs.clear()
         connectedClients.clear()
         fileServer = FileServer(port, File(rootPath), context, internalListener).apply {
             setSecurity(enablePassword, password)
             setToggles(allowModifications, allowPreviews)
             setInterface(selectedInterface)
-            logs.add("Start: Strict=${strictMode}, Allowed Count=${allowedIps.size}")
+            setMaxConnections(maxConn)
+            logs.add("Start: Strict=${strictMode}, Allowed Count=${allowedIps.size}, MaxConn=${if(maxConn==0) "Unlimited" else maxConn}")
             setStrictMode(strictMode, allowedIps.toSet())
             start()
         }
@@ -259,6 +266,13 @@ object ServerManager {
         val prefs = context.getSharedPreferences("shttps_prefs", Context.MODE_PRIVATE)
         prefs.edit().putBoolean("strict_mode", enabled).apply()
         fileServer?.setStrictMode(enabled, allowedIps.toSet())
+    }
+
+    fun updateMaxConnections(context: Context, count: Int) {
+        maxConnections = count
+        val prefs = context.getSharedPreferences("shttps_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putInt("max_connections", count).apply()
+        fileServer?.setMaxConnections(count)
     }
 
     /**

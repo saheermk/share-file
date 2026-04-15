@@ -31,9 +31,10 @@ class KeepAliveService : Service() {
         }
 
         val notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Share File")
-            .setContentText("Server is active at ${ServerManager.serverUrl}")
-            .setSmallIcon(android.R.drawable.ic_menu_share)
+            .setContentTitle("Share File Server Running")
+            .setContentText("Share File is running • ${ServerManager.serverUrl}")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .build()
         

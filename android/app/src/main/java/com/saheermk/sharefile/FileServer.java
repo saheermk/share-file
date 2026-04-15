@@ -12,13 +12,19 @@ import android.graphics.PorterDuffXfermode;
 import android.graphics.Rect;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
+import android.graphics.BitmapFactory;
+import android.media.ThumbnailUtils;
+import android.provider.MediaStore;
 import android.util.Log;
 import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /**
  * Pure-Java HTTP file server — SHTTPS clone core.
@@ -58,6 +64,10 @@ public class FileServer {
     // Strict Mode Settings
     private boolean strictMode = false;
     private final Set<String> allowedIps = new HashSet<>();
+
+    // Connection Limiting
+    private int maxConnections = 0; // 0 = unlimited
+    private final AtomicInteger activeConnections = new AtomicInteger(0);
 
     public interface OnServerListener {
         void onStarted(String ip, int port);
@@ -148,6 +158,10 @@ public class FileServer {
         }
     }
 
+    public void setMaxConnections(int max) {
+        this.maxConnections = max;
+    }
+
     public void start() {
         pool = Executors.newFixedThreadPool(8);
         new Thread(() -> {
@@ -216,9 +230,17 @@ public class FileServer {
     // ─── Request Handler ────────────────────────────────────────────────────
 
     private void handle(Socket socket) {
+        int currentActive = activeConnections.incrementAndGet();
         String clientIp = socket.getInetAddress().getHostAddress();
         try (InputStream input = socket.getInputStream();
                 OutputStream output = socket.getOutputStream()) {
+
+            // Connection Limit Check
+            if (maxConnections > 0 && currentActive > maxConnections) {
+                log("LIMIT: Rejected connection from " + clientIp + " (Limit: " + maxConnections + ")");
+                sendError(output, 503, "Server Busy: Maximum connection limit reached.");
+                return;
+            }
 
             // Strict Mode Check
             if (strictMode) {
@@ -320,7 +342,7 @@ public class FileServer {
             }
 
             if ("GET".equalsIgnoreCase(method)) {
-                handleGet(rawOut, path, query, clientIp);
+                handleGet(rawOut, path, query, clientIp, headers);
             } else if ("POST".equalsIgnoreCase(method)) {
                 String ct = headers.getOrDefault("content-type", "");
                 String lenStr = headers.getOrDefault("content-length", "0");
@@ -337,6 +359,7 @@ public class FileServer {
         } catch (Exception e) {
             Log.e(TAG, "handle error", e);
         } finally {
+            activeConnections.decrementAndGet();
             try {
                 socket.close();
             } catch (IOException ignored) {
@@ -386,7 +409,8 @@ public class FileServer {
 
     // ─── GET Handler ────────────────────────────────────────────────────────
 
-    private void handleGet(OutputStream out, String path, String query, String clientIp) throws IOException {
+    private void handleGet(OutputStream out, String path, String query, String clientIp, Map<String, String> headers)
+            throws IOException {
         if (path.startsWith("/assets/")) {
             serveAsset(out, path.substring(8));
             return;
@@ -412,19 +436,19 @@ public class FileServer {
             return;
         }
 
-        // --- New Routing ---
-        if (path.equals("/")) {
-            sendHtml(out, WebInterface.buildLandingPage());
+        if (path.startsWith("/api/")) {
+            handleApi(out, path, query, clientIp);
             return;
         }
 
-        if (path.equals("/apps")) {
-            sendHtml(out, WebInterface.buildAppsListing(getInstalledApps()));
+        // --- New Routing ---
+        if (path.equals("/") || path.equals("/files") || path.equals("/apps")) {
+            sendHtml(out, WebInterface.buildSpaShell());
             return;
         }
 
         if (path.equals("/download_app")) {
-            handleAppDownload(out, query);
+            handleAppDownload(out, query, headers);
             return;
         }
 
@@ -487,10 +511,10 @@ public class FileServer {
         }
 
         // --- File Manager ---
-        if (path.equals("/files") || path.equals("/download")) {
+        if (path.equals("/download")) {
             String relPath = getQueryParam(query, "path");
             if (relPath == null)
-                relPath = getQueryParam(query, "file"); // fallback for legacy /download
+                relPath = getQueryParam(query, "file");
             if (relPath == null)
                 relPath = "";
             if (relPath.startsWith("/"))
@@ -502,20 +526,111 @@ public class FileServer {
                 return;
             }
 
-            if (target.isDirectory() && path.equals("/files")) {
-                sendHtml(out,
-                        WebInterface.buildDirListing(target, rootDir, relPath, isModAllowed(clientIp),
-                                isPrevAllowed(clientIp)));
-            } else if (target.isFile()) {
+            if (target.isFile()) {
                 boolean forceDownload = "1".equals(getQueryParam(query, "dl"));
-                streamFile(out, target, forceDownload);
+                streamFile(out, target, forceDownload, headers);
             } else {
                 sendError(out, 404, "Not Found");
             }
             return;
         }
 
+        if (path.equals("/thumb")) {
+            handleThumb(out, query);
+            return;
+        }
+
         sendError(out, 404, "Not Found");
+    }
+
+    private void handleApi(OutputStream out, String path, String query, String clientIp) throws IOException {
+        try {
+            if (path.equals("/api/status")) {
+                JSONObject status = new JSONObject();
+                status.put("running", running);
+                status.put("version", "3.0.6");
+                status.put("strictMode", strictMode);
+                status.put("allowModifications", allowModifications);
+                status.put("hasClipboard", Clipboard.sourceFile != null);
+                if (Clipboard.sourceFile != null) {
+                    status.put("clipboardName", Clipboard.sourceFile.getName());
+                    status.put("isCut", Clipboard.isCut);
+                }
+                JSONObject auth = new JSONObject();
+                auth.put("passwordEnabled", passwordEnabled);
+                status.put("auth", auth);
+                sendJson(out, status);
+
+            } else if (path.equals("/api/files")) {
+                String relPath = getQueryParam(query, "path");
+                if (relPath == null)
+                    relPath = "";
+                if (relPath.startsWith("/"))
+                    relPath = relPath.substring(1);
+                File dir = relPath.isEmpty() ? rootDir : new File(rootDir, relPath);
+                if (!isInsideRoot(dir) || !dir.isDirectory()) {
+                    sendError(out, 403, "Forbidden");
+                    return;
+                }
+                JSONArray arr = new JSONArray();
+                File[] kids = dir.listFiles();
+                if (kids != null) {
+                    // Sort: directories first, then alphabetical
+                    Arrays.sort(kids, (a, b) -> {
+                        if (a.isDirectory() && !b.isDirectory())
+                            return -1;
+                        if (!a.isDirectory() && b.isDirectory())
+                            return 1;
+                        return a.getName().compareToIgnoreCase(b.getName());
+                    });
+                    for (File f : kids) {
+                        JSONObject obj = new JSONObject();
+                        obj.put("name", f.getName());
+                        obj.put("isDir", f.isDirectory());
+                        obj.put("size", f.length());
+                        obj.put("lastModified", f.lastModified());
+
+                        if (!f.isDirectory()) {
+                            String n = f.getName().toLowerCase();
+                            if (n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png") || n.endsWith(".gif")
+                                    || n.endsWith(".webp")) {
+                                obj.put("mediaType", "image");
+                            } else if (n.endsWith(".mp4") || n.endsWith(".webm") || n.endsWith(".mkv")
+                                    || n.endsWith(".avi") || n.endsWith(".mov")) {
+                                obj.put("mediaType", "video");
+                            }
+                        }
+                        arr.put(obj);
+                    }
+                }
+                sendJson(out, arr);
+            } else if (path.equals("/api/apps")) {
+                JSONArray arr = new JSONArray();
+                for (AppItem app : getInstalledApps()) {
+                    JSONObject obj = new JSONObject();
+                    obj.put("name", app.name);
+                    obj.put("packageName", app.packageName);
+                    obj.put("size", app.size);
+                    arr.put(obj);
+                }
+                sendJson(out, arr);
+            } else {
+                sendError(out, 404, "API Not Found");
+            }
+        } catch (Exception e) {
+            sendError(out, 500, "API Error: " + e.getMessage());
+        }
+    }
+
+    private void sendJson(OutputStream out, Object json) throws IOException {
+        byte[] data = json.toString().getBytes("UTF-8");
+        out.write("HTTP/1.1 200 OK\r\n".getBytes("UTF-8"));
+        out.write("Content-Type: application/json\r\n".getBytes("UTF-8"));
+        out.write(("Content-Length: " + data.length + "\r\n").getBytes("UTF-8"));
+        out.write("Access-Control-Allow-Origin: *\r\n".getBytes("UTF-8"));
+        out.write("Connection: close\r\n\r\n".getBytes("UTF-8"));
+        out.write(data);
+        out.flush();
     }
 
     // ─── File Operations ─────────────────────────────────────────────────────
@@ -537,7 +652,13 @@ public class FileServer {
         File parent = new File(rootDir, parentPath.startsWith("/") ? parentPath.substring(1) : parentPath);
         File newDir = new File(parent, name);
         if (isInsideRoot(newDir) && newDir.mkdirs()) {
-            sendRedirect(out, "/files?path=" + WebInterface.urlEncode(parentPath));
+            try {
+                JSONObject res = new JSONObject();
+                res.put("success", true);
+                sendJson(out, res);
+            } catch (Exception e) {
+                sendError(out, 500, e.getMessage());
+            }
         } else {
             sendError(out, 500, "Failed to create directory");
         }
@@ -551,9 +672,13 @@ public class FileServer {
         }
         File f = new File(rootDir, filePath.startsWith("/") ? filePath.substring(1) : filePath);
         if (isInsideRoot(f) && deleteRecursive(f)) {
-            File parent = f.getParentFile();
-            String parentRel = parent.getAbsolutePath().substring(rootDir.getAbsolutePath().length());
-            sendRedirect(out, "/files?path=" + WebInterface.urlEncode(parentRel.isEmpty() ? "/" : parentRel));
+            try {
+                JSONObject res = new JSONObject();
+                res.put("success", true);
+                sendJson(out, res);
+            } catch (Exception e) {
+                sendError(out, 500, e.getMessage());
+            }
         } else {
             sendError(out, 500, "Failed to delete");
         }
@@ -586,25 +711,107 @@ public class FileServer {
                 deleteRecursive(f);
             }
         }
-        sendRedirect(out, "/files?path=" + WebInterface.urlEncode(parentPath));
+        try {
+            JSONObject res = new JSONObject();
+            res.put("success", true);
+            sendJson(out, res);
+        } catch (Exception e) {
+            sendError(out, 500, e.getMessage());
+        }
     }
 
     private void handleRename(OutputStream out, String query) throws IOException {
         String filePath = getQueryParam(query, "file");
         String newName = getQueryParam(query, "new");
+        String conflict = getQueryParam(query, "conflict"); // override, auto
         if (filePath == null || newName == null) {
             sendError(out, 400, "Params missing");
             return;
         }
         File f = new File(rootDir, filePath.startsWith("/") ? filePath.substring(1) : filePath);
         File dest = new File(f.getParentFile(), newName);
-        if (isInsideRoot(f) && isInsideRoot(dest) && f.renameTo(dest)) {
-            File parent = f.getParentFile();
-            String parentRel = parent.getAbsolutePath().substring(rootDir.getAbsolutePath().length());
-            sendRedirect(out, "/files?path=" + WebInterface.urlEncode(parentRel.isEmpty() ? "/" : parentRel));
-        } else {
-            sendError(out, 500, "Rename failed");
+        if ("auto".equals(conflict)) {
+            dest = getUniqueFile(f.getParentFile(), newName);
         }
+        if (isInsideRoot(f) && isInsideRoot(dest)) {
+            if (dest.exists() && !"override".equals(conflict)) {
+                sendError(out, 409, "File exists");
+                return;
+            }
+            if (f.renameTo(dest)) {
+                try {
+                    JSONObject res = new JSONObject();
+                    res.put("success", true);
+                    res.put("newName", dest.getName());
+                    sendJson(out, res);
+                } catch (Exception e) {
+                    sendError(out, 500, e.getMessage());
+                }
+            } else {
+                sendError(out, 500, "Rename failed");
+            }
+        } else {
+            sendError(out, 403, "Forbidden");
+        }
+    }
+
+    private void handleThumb(OutputStream out, String query) throws IOException {
+        String filePath = getQueryParam(query, "file");
+        if (filePath == null) {
+            sendError(out, 400, "Missing file");
+            return;
+        }
+        if (filePath.startsWith("/"))
+            filePath = filePath.substring(1);
+        File f = new File(rootDir, filePath);
+        if (!isInsideRoot(f) || !f.exists()) {
+            sendError(out, 404, "Not Found");
+            return;
+        }
+
+        Bitmap thumb = null;
+        String mime = "image/jpeg";
+        String n = f.getName().toLowerCase();
+
+        try {
+            if (n.endsWith(".mp4") || n.endsWith(".webm") || n.endsWith(".mkv") || n.endsWith(".avi")
+                    || n.endsWith(".mov")) {
+                thumb = ThumbnailUtils.createVideoThumbnail(f.getAbsolutePath(), MediaStore.Video.Thumbnails.MINI_KIND);
+            } else {
+                BitmapFactory.Options options = new BitmapFactory.Options();
+                options.inJustDecodeBounds = true;
+                BitmapFactory.decodeFile(f.getAbsolutePath(), options);
+                options.inSampleSize = calculateInSampleSize(options, 200, 200);
+                options.inJustDecodeBounds = false;
+                thumb = BitmapFactory.decodeFile(f.getAbsolutePath(), options);
+            }
+
+            if (thumb != null) {
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                thumb.compress(Bitmap.CompressFormat.JPEG, 70, baos);
+                byte[] bytes = baos.toByteArray();
+                sendResponse(out, "200 OK", mime, bytes);
+                thumb.recycle();
+            } else {
+                sendError(out, 500, "Failed to create thumbnail");
+            }
+        } catch (Exception e) {
+            sendError(out, 500, e.getMessage());
+        }
+    }
+
+    private int calculateInSampleSize(BitmapFactory.Options options, int reqWidth, int reqHeight) {
+        final int height = options.outHeight;
+        final int width = options.outWidth;
+        int inSampleSize = 1;
+        if (height > reqHeight || width > reqWidth) {
+            final int halfHeight = height / 2;
+            final int halfWidth = width / 2;
+            while ((halfHeight / inSampleSize) >= reqHeight && (halfWidth / inSampleSize) >= reqWidth) {
+                inSampleSize *= 2;
+            }
+        }
+        return inSampleSize;
     }
 
     private void handleClipboardAction(OutputStream out, String action, String query) throws IOException {
@@ -617,16 +824,25 @@ public class FileServer {
         if (isInsideRoot(f)) {
             Clipboard.sourceFile = f;
             Clipboard.isCut = action.equals("/cut");
-            File parent = f.getParentFile();
-            String parentRel = parent.getAbsolutePath().substring(rootDir.getAbsolutePath().length());
-            sendRedirect(out, "/files?path=" + WebInterface.urlEncode(parentRel.isEmpty() ? "/" : parentRel));
+            try {
+                JSONObject res = new JSONObject();
+                res.put("success", true);
+                res.put("fileName", f.getName());
+                res.put("isCut", Clipboard.isCut);
+                sendJson(out, res);
+            } catch (Exception e) {
+                sendError(out, 500, e.getMessage());
+            }
         } else {
             sendError(out, 403, "Forbidden");
         }
     }
 
     private void handlePaste(OutputStream out, String query) throws IOException {
-        String destPath = getQueryParam(query, "to");
+        String destPath = getQueryParam(query, "path");
+        if (destPath == null)
+            destPath = getQueryParam(query, "to");
+        String conflict = getQueryParam(query, "conflict");
         if (destPath == null)
             destPath = "";
         if (Clipboard.sourceFile == null) {
@@ -635,8 +851,15 @@ public class FileServer {
         }
         File destDir = new File(rootDir, destPath.startsWith("/") ? destPath.substring(1) : destPath);
         File target = new File(destDir, Clipboard.sourceFile.getName());
+        if ("auto".equals(conflict)) {
+            target = getUniqueFile(destDir, Clipboard.sourceFile.getName());
+        }
 
         if (isInsideRoot(destDir) && isInsideRoot(target)) {
+            if (target.exists() && !"override".equals(conflict)) {
+                sendError(out, 409, "File exists");
+                return;
+            }
             try {
                 if (Clipboard.isCut) {
                     if (Clipboard.sourceFile.renameTo(target)) {
@@ -647,8 +870,10 @@ public class FileServer {
                 } else {
                     copyRecursive(Clipboard.sourceFile, target);
                 }
-                sendRedirect(out, "/files?path=" + WebInterface.urlEncode(destPath));
-            } catch (IOException e) {
+                JSONObject res = new JSONObject();
+                res.put("success", true);
+                sendJson(out, res);
+            } catch (Exception e) {
                 sendError(out, 500, "Paste failed: " + e.getMessage());
             }
         } else {
@@ -827,7 +1052,15 @@ public class FileServer {
         if (bodyDataEnd < 0)
             bodyDataEnd = bodyBytes.length;
 
+        String conflict = getQueryParam(query, "conflict");
         File outFile = new File(destDir, filename);
+        if ("auto".equals(conflict)) {
+            outFile = getUniqueFile(destDir, filename);
+        } else if (outFile.exists() && !"override".equals(conflict)) {
+            sendError(out, 409, "File exists");
+            return;
+        }
+
         FileOutputStream fos = new FileOutputStream(outFile);
         // Write raw bytes to preserve binary data
         fos.write(bodyBytes, bodyDataStart, bodyDataEnd - bodyDataStart);
@@ -836,35 +1069,109 @@ public class FileServer {
         if (listener != null)
             listener.onLog("Uploaded: " + filename + " (" + (bodyDataEnd - bodyDataStart) + " bytes)");
 
-        // Redirect back to folder
-        String redirect = "/files?path=" + (relPath.isEmpty() ? "" : "/" + relPath);
-        sendRedirect(out, redirect);
+        try {
+            JSONObject res = new JSONObject();
+            res.put("success", true);
+            res.put("filename", filename);
+            sendJson(out, res);
+        } catch (Exception e) {
+            sendError(out, 500, e.getMessage());
+        }
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
+    private File getUniqueFile(File parent, String name) {
+        File f = new File(parent, name);
+        if (!f.exists())
+            return f;
+        String base = name;
+        String ext = "";
+        int dot = name.lastIndexOf('.');
+        if (dot > 0) {
+            base = name.substring(0, dot);
+            ext = name.substring(dot);
+        }
+        int count = 1;
+        while (true) {
+            f = new File(parent, base + " (" + count + ")" + ext);
+            if (!f.exists())
+                return f;
+            count++;
+            if (count > 100)
+                break; // safety
+        }
+        return f;
+    }
 
-    private void streamFile(OutputStream out, File f, boolean forceDownload) throws IOException {
+    private void streamFile(OutputStream out, File f, boolean forceDownload, Map<String, String> headers)
+            throws IOException {
+        long fileSize = f.length();
+        String rangeHeader = headers.get("range");
+        long start = 0;
+        long end = fileSize - 1;
+
+        if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+            String[] rangeParts = rangeHeader.substring(6).split("-");
+            try {
+                if (rangeParts.length > 0 && !rangeParts[0].isEmpty()) {
+                    start = Long.parseLong(rangeParts[0]);
+                }
+                if (rangeParts.length > 1 && !rangeParts[1].isEmpty()) {
+                    end = Long.parseLong(rangeParts[1]);
+                }
+            } catch (NumberFormatException e) {
+                // Ignore malformed range
+            }
+        }
+
+        // Validate range
+        if (start < 0)
+            start = 0;
+        if (end >= fileSize)
+            end = fileSize - 1;
+        if (start > end)
+            start = end;
+
+        long contentLength = end - start + 1;
+        boolean isPartial = rangeHeader != null;
+
         String mime = URLConnection.guessContentTypeFromName(f.getName());
         if (mime == null)
             mime = "application/octet-stream";
 
         String disposition = (forceDownload || !allowPreviews) ? "attachment" : "inline";
         StringBuilder sb = new StringBuilder();
-        sb.append("HTTP/1.1 200 OK\r\n")
+        sb.append(isPartial ? "HTTP/1.1 206 Partial Content\r\n" : "HTTP/1.1 200 OK\r\n")
                 .append("Content-Type: ").append(mime).append("\r\n")
-                .append("Content-Length: ").append(f.length()).append("\r\n")
-                .append("Content-Disposition: ").append(disposition).append("; filename=\"").append(f.getName())
+                .append("Content-Length: ").append(contentLength).append("\r\n")
+                .append("Accept-Ranges: bytes\r\n");
+
+        if (isPartial) {
+            sb.append("Content-Range: bytes ").append(start).append("-").append(end).append("/").append(fileSize)
+                    .append("\r\n");
+        }
+
+        sb.append("Content-Disposition: ").append(disposition).append("; filename=\"").append(f.getName())
                 .append("\"\r\n")
                 .append("Connection: close\r\n\r\n");
 
         out.write(sb.toString().getBytes("UTF-8"));
-        log("RESPONSE: 200 OK (Streamed " + f.getName() + " as " + disposition + ")");
+        log("RESPONSE: " + (isPartial ? "206 Partial" : "200 OK") + " (Streamed " + f.getName() + " range " + start
+                + "-"
+                + end + ")");
 
-        try (FileInputStream fis = new FileInputStream(f)) {
+        try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
+            raf.seek(start);
             byte[] buf = new byte[65536];
-            int n;
-            while ((n = fis.read(buf)) != -1)
+            long remaining = contentLength;
+            while (remaining > 0) {
+                int toRead = (int) Math.min(buf.length, remaining);
+                int n = raf.read(buf, 0, toRead);
+                if (n == -1)
+                    break;
                 out.write(buf, 0, n);
+                remaining -= n;
+            }
         }
         out.flush();
     }
@@ -1033,7 +1340,7 @@ public class FileServer {
         return list;
     }
 
-    private void handleAppDownload(OutputStream out, String query) throws IOException {
+    private void handleAppDownload(OutputStream out, String query, Map<String, String> headers) throws IOException {
         String pkg = getQueryParam(query, "pkg");
         if (pkg == null) {
             sendError(out, 400, "Missing package name");
@@ -1044,7 +1351,7 @@ public class FileServer {
             ApplicationInfo app = pm.getApplicationInfo(pkg, 0);
             File apkFile = new File(app.sourceDir);
             if (apkFile.exists()) {
-                streamFile(out, apkFile, true);
+                streamFile(out, apkFile, true, headers);
             } else {
                 sendError(out, 404, "APK not found");
             }
