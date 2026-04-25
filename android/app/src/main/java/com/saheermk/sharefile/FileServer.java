@@ -1,6 +1,7 @@
 package com.saheermk.sharefile;
 
 import android.content.Context;
+import android.net.Uri;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -346,9 +347,9 @@ public class FileServer {
             } else if ("POST".equalsIgnoreCase(method)) {
                 String ct = headers.getOrDefault("content-type", "");
                 String lenStr = headers.getOrDefault("content-length", "0");
-                int contentLength = Integer.parseInt(lenStr);
+                long contentLength = Long.parseLong(lenStr);
                 if (path.equals("/telemetry")) {
-                    handleTelemetry(rawOut, rawIn, contentLength, clientIp);
+                    handleTelemetry(rawOut, rawIn, (int) Math.min(contentLength, Integer.MAX_VALUE), clientIp);
                 } else {
                     handlePost(rawOut, path, query, ct, rawIn, contentLength, clientIp);
                 }
@@ -442,7 +443,7 @@ public class FileServer {
         }
 
         // --- New Routing ---
-        if (path.equals("/") || path.equals("/files") || path.equals("/apps")) {
+        if (path.equals("/") || path.equals("/files") || path.equals("/apps") || path.equals("/gallery")) {
             sendHtml(out, WebInterface.buildSpaShell());
             return;
         }
@@ -574,6 +575,8 @@ public class FileServer {
                 }
                 JSONArray arr = new JSONArray();
                 File[] kids = dir.listFiles();
+                int limit = Integer.parseInt(getQueryParam(query, "limit", "-1"));
+                int offset = Integer.parseInt(getQueryParam(query, "offset", "0"));
                 if (kids != null) {
                     // Sort: directories first, then alphabetical
                     Arrays.sort(kids, (a, b) -> {
@@ -583,7 +586,11 @@ public class FileServer {
                             return 1;
                         return a.getName().compareToIgnoreCase(b.getName());
                     });
-                    for (File f : kids) {
+                    int total = kids.length;
+                    int start = Math.min(offset, total);
+                    int end = limit > 0 ? Math.min(start + limit, total) : total;
+                    for (int i = start; i < end; i++) {
+                        File f = kids[i];
                         JSONObject obj = new JSONObject();
                         obj.put("name", f.getName());
                         obj.put("isDir", f.isDirectory());
@@ -600,7 +607,87 @@ public class FileServer {
                                 obj.put("mediaType", "video");
                             }
                         }
+
+                        String fullPath = f.getCanonicalPath();
+                        String rootPath = rootDir.getCanonicalPath();
+                        String relPathRes = fullPath.length() > rootPath.length()
+                                ? fullPath.substring(rootPath.length())
+                                : "";
+                        if (relPathRes.startsWith("/"))
+                            relPathRes = relPathRes.substring(1);
+                        obj.put("path", relPathRes);
+
+                        String dirPath = f.getParentFile().getCanonicalPath();
+                        String relDirPath = dirPath.length() > rootPath.length()
+                                ? dirPath.substring(rootPath.length())
+                                : "";
+                        if (relDirPath.startsWith("/"))
+                            relDirPath = relDirPath.substring(1);
+                        obj.put("dir", relDirPath);
+
                         arr.put(obj);
+                    }
+                }
+                sendJson(out, arr);
+            } else if (path.equals("/api/gallery")) {
+                int limit = Integer.parseInt(getQueryParam(query, "limit", "-1"));
+                int offset = Integer.parseInt(getQueryParam(query, "offset", "0"));
+                List<File> allMedia = new ArrayList<>();
+
+                // Try MediaStore first (Instant)
+                getGalleryFromMediaStore(allMedia);
+
+                // Fallback to Scan if empty (maybe files not indexed yet or root outside media
+                // volume)
+                if (allMedia.isEmpty()) {
+                    getGalleryFiles(rootDir, allMedia);
+                }
+
+                // Sort by lastModified desc
+                Collections.sort(allMedia, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+
+                int total = allMedia.size();
+                int start = Math.min(offset, total);
+                int end = limit > 0 ? Math.min(start + limit, total) : total;
+                List<File> subList = allMedia.subList(start, end);
+
+                JSONArray arr = new JSONArray();
+                for (File f : subList) {
+                    try {
+                        JSONObject obj = new JSONObject();
+                        obj.put("name", f.getName());
+                        obj.put("isDir", false);
+                        obj.put("size", f.length());
+                        obj.put("lastModified", f.lastModified());
+
+                        String name = f.getName().toLowerCase();
+                        String mediaType = "file";
+                        if (name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png")
+                                || name.endsWith(".gif")
+                                || name.endsWith(".webp"))
+                            mediaType = "image";
+                        else if (name.endsWith(".mp4") || name.endsWith(".webm") || name.endsWith(".mkv")
+                                || name.endsWith(".avi") || name.endsWith(".mov"))
+                            mediaType = "video";
+                        obj.put("mediaType", mediaType);
+
+                        String fullPath = f.getCanonicalPath();
+                        String rootPath = rootDir.getCanonicalPath();
+                        String relPath = fullPath.length() > rootPath.length() ? fullPath.substring(rootPath.length())
+                                : "";
+                        if (relPath.startsWith("/"))
+                            relPath = relPath.substring(1);
+                        obj.put("path", relPath);
+
+                        String dirPath = f.getParentFile().getCanonicalPath();
+                        String relDirPath = dirPath.length() > rootPath.length() ? dirPath.substring(rootPath.length())
+                                : "";
+                        if (relDirPath.startsWith("/"))
+                            relDirPath = relDirPath.substring(1);
+                        obj.put("dir", relDirPath);
+
+                        arr.put(obj);
+                    } catch (Exception ignored) {
                     }
                 }
                 sendJson(out, arr);
@@ -975,7 +1062,7 @@ public class FileServer {
     // ─── POST Handler (file upload) ──────────────────────────────────────────
 
     private void handlePost(OutputStream out, String path, String query,
-            String contentType, InputStream body, int contentLength, String clientIp) throws IOException {
+            String contentType, InputStream body, long contentLength, String clientIp) throws IOException {
         if (!isModAllowed(clientIp)) {
             sendError(out, 403, "Modifications disabled for this client");
             return;
@@ -991,6 +1078,9 @@ public class FileServer {
             part = part.trim();
             if (part.startsWith("boundary=")) {
                 boundary = part.substring("boundary=".length()).trim();
+                if (boundary.startsWith("\"") && boundary.endsWith("\"")) {
+                    boundary = boundary.substring(1, boundary.length() - 1);
+                }
                 break;
             }
         }
@@ -1015,42 +1105,35 @@ public class FileServer {
             return;
         }
 
-        // Read body bytes
-        byte[] bodyBytes = new byte[contentLength];
-        int read = 0;
-        while (read < contentLength) {
-            int n = body.read(bodyBytes, read, contentLength - read);
-            if (n < 0)
+        // Stream headers first to find filename
+        ByteArrayOutputStream headerBuf = new ByteArrayOutputStream();
+        int b;
+        int state = 0; // 0: \r, 1: \n, 2: \r, 3: \n
+        long bytesRead = 0;
+        while (bytesRead < contentLength && (b = body.read()) != -1) {
+            headerBuf.write(b);
+            bytesRead++;
+            if (b == '\r' && (state == 0 || state == 2))
+                state++;
+            else if (b == '\n' && state == 1)
+                state++;
+            else if (b == '\n' && state == 3) {
+                state++;
                 break;
-            read += n;
+            } else
+                state = 0;
         }
 
-        // Parse multipart — find filename and data
-        String boundaryLine = "--" + boundary;
-        String bodyStr = new String(bodyBytes, "ISO-8859-1");
-        // Simple approach: split on boundaries
-        int dataStart = bodyStr.indexOf("\r\n\r\n");
-        if (dataStart < 0) {
-            sendError(out, 400, "Bad multipart");
-            return;
-        }
+        String headerStr = new String(headerBuf.toByteArray(), "ISO-8859-1");
 
         // Extract filename from Content-Disposition
         String filename = "upload_" + System.currentTimeMillis();
-        int fnIdx = bodyStr.indexOf("filename=\"");
+        int fnIdx = headerStr.indexOf("filename=\"");
         if (fnIdx >= 0) {
-            int fnEnd = bodyStr.indexOf("\"", fnIdx + 10);
+            int fnEnd = headerStr.indexOf("\"", fnIdx + 10);
             if (fnEnd > fnIdx)
-                filename = bodyStr.substring(fnIdx + 10, fnEnd);
+                filename = headerStr.substring(fnIdx + 10, fnEnd);
         }
-
-        // Data starts after header block
-        int bodyDataStart = dataStart + 4;
-        // Data ends before trailing boundary
-        String endBoundary = "\r\n--" + boundary;
-        int bodyDataEnd = bodyStr.indexOf(endBoundary, bodyDataStart);
-        if (bodyDataEnd < 0)
-            bodyDataEnd = bodyBytes.length;
 
         String conflict = getQueryParam(query, "conflict");
         File outFile = new File(destDir, filename);
@@ -1062,12 +1145,67 @@ public class FileServer {
         }
 
         FileOutputStream fos = new FileOutputStream(outFile);
-        // Write raw bytes to preserve binary data
-        fos.write(bodyBytes, bodyDataStart, bodyDataEnd - bodyDataStart);
+        byte[] buf = new byte[65536];
+        byte[] searchSeq = ("\r\n--" + boundary).getBytes("ISO-8859-1");
+        int seqLen = searchSeq.length;
+
+        byte[] window = new byte[buf.length + seqLen];
+        int windowLen = 0;
+        long remaining = contentLength - bytesRead;
+        boolean done = false;
+        long bytesWritten = 0;
+
+        while (remaining > 0 && !done) {
+            int toRead = (int) Math.min((long) buf.length, remaining);
+            int r = body.read(buf, 0, toRead);
+            if (r < 0)
+                break;
+            remaining -= r;
+
+            System.arraycopy(buf, 0, window, windowLen, r);
+            windowLen += r;
+
+            int boundaryIdx = -1;
+            for (int i = 0; i <= windowLen - seqLen; i++) {
+                boolean match = true;
+                for (int j = 0; j < seqLen; j++) {
+                    if (window[i + j] != searchSeq[j]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    boundaryIdx = i;
+                    break;
+                }
+            }
+
+            if (boundaryIdx >= 0) {
+                fos.write(window, 0, boundaryIdx);
+                bytesWritten += boundaryIdx;
+                done = true;
+            } else {
+                int safeToWrite = windowLen - (seqLen - 1);
+                if (safeToWrite > 0) {
+                    fos.write(window, 0, safeToWrite);
+                    bytesWritten += safeToWrite;
+                    System.arraycopy(window, safeToWrite, window, 0, windowLen - safeToWrite);
+                    windowLen -= safeToWrite;
+                }
+            }
+        }
+
+        if (!done && windowLen > 0) {
+            fos.write(window, 0, windowLen);
+            bytesWritten += windowLen;
+        }
         fos.close();
 
+        // Read remaining payload if any to avoid connection reset, but we don't really
+        // have to.
+
         if (listener != null)
-            listener.onLog("Uploaded: " + filename + " (" + (bodyDataEnd - bodyDataStart) + " bytes)");
+            listener.onLog("Uploaded: " + filename + " (" + bytesWritten + " bytes)");
 
         try {
             JSONObject res = new JSONObject();
@@ -1076,6 +1214,55 @@ public class FileServer {
             sendJson(out, res);
         } catch (Exception e) {
             sendError(out, 500, e.getMessage());
+        }
+    }
+
+    private void getGalleryFromMediaStore(List<File> results) {
+        String rootPath;
+        try {
+            rootPath = rootDir.getCanonicalPath();
+            if (!rootPath.endsWith("/"))
+                rootPath += "/";
+        } catch (Exception e) {
+            rootPath = rootDir.getAbsolutePath();
+        }
+
+        String[] projection = { MediaStore.MediaColumns.DATA };
+        Uri[] uris = { MediaStore.Images.Media.EXTERNAL_CONTENT_URI, MediaStore.Video.Media.EXTERNAL_CONTENT_URI };
+
+        for (Uri uri : uris) {
+            try (android.database.Cursor cursor = context.getContentResolver().query(uri, projection, null, null,
+                    null)) {
+                if (cursor != null) {
+                    int dataIdx = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATA);
+                    while (cursor.moveToNext()) {
+                        String path = cursor.getString(dataIdx);
+                        if (path != null && path.startsWith(rootPath)) {
+                            results.add(new File(path));
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log("MediaStore query error: " + e.getMessage());
+            }
+        }
+    }
+
+    private void getGalleryFiles(File dir, List<File> results) {
+        File[] children = dir.listFiles();
+        if (children == null)
+            return;
+        for (File f : children) {
+            if (f.isDirectory()) {
+                getGalleryFiles(f, results);
+            } else {
+                String name = f.getName().toLowerCase();
+                if (name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png") || name.endsWith(".gif")
+                        || name.endsWith(".webp") || name.endsWith(".mp4") || name.endsWith(".webm")
+                        || name.endsWith(".mkv") || name.endsWith(".avi") || name.endsWith(".mov")) {
+                    results.add(f);
+                }
+            }
         }
     }
 
@@ -1101,6 +1288,46 @@ public class FileServer {
                 break; // safety
         }
         return f;
+    }
+
+    private boolean isInsideRoot(File file) {
+        try {
+            String cp = file.getCanonicalPath();
+            String rp = rootDir.getCanonicalPath();
+            if (cp.equals(rp))
+                return true;
+            if (!rp.endsWith(File.separator))
+                rp += File.separator;
+            return cp.startsWith(rp);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private String getMimeType(String name) {
+        String n = name.toLowerCase();
+        if (n.endsWith(".jpg") || n.endsWith(".jpeg"))
+            return "image/jpeg";
+        if (n.endsWith(".png"))
+            return "image/png";
+        if (n.endsWith(".gif"))
+            return "image/gif";
+        if (n.endsWith(".webp"))
+            return "image/webp";
+        if (n.endsWith(".mp4"))
+            return "video/mp4";
+        if (n.endsWith(".webm"))
+            return "video/webm";
+        if (n.endsWith(".mkv"))
+            return "video/x-matroska";
+        if (n.endsWith(".mp3"))
+            return "audio/mpeg";
+        if (n.endsWith(".pdf"))
+            return "application/pdf";
+        if (n.endsWith(".zip"))
+            return "application/zip";
+        String m = URLConnection.guessContentTypeFromName(n);
+        return m != null ? m : "application/octet-stream";
     }
 
     private void streamFile(OutputStream out, File f, boolean forceDownload, Map<String, String> headers)
@@ -1135,9 +1362,7 @@ public class FileServer {
         long contentLength = end - start + 1;
         boolean isPartial = rangeHeader != null;
 
-        String mime = URLConnection.guessContentTypeFromName(f.getName());
-        if (mime == null)
-            mime = "application/octet-stream";
+        String mime = getMimeType(f.getName());
 
         String disposition = (forceDownload || !allowPreviews) ? "attachment" : "inline";
         StringBuilder sb = new StringBuilder();
@@ -1225,14 +1450,6 @@ public class FileServer {
         out.flush();
     }
 
-    private boolean isInsideRoot(File f) {
-        try {
-            return f.getCanonicalPath().startsWith(rootDir.getCanonicalPath());
-        } catch (IOException e) {
-            return false;
-        }
-    }
-
     private String getQueryParam(String query, String key) {
         if (query == null || query.isEmpty())
             return null;
@@ -1247,6 +1464,11 @@ public class FileServer {
             }
         }
         return null;
+    }
+
+    private String getQueryParam(String query, String key, String defaultValue) {
+        String val = getQueryParam(query, key);
+        return val != null ? val : defaultValue;
     }
 
     private String readLine(InputStream in) throws IOException {
@@ -1326,9 +1548,6 @@ public class FileServer {
         PackageManager pm = context.getPackageManager();
         List<ApplicationInfo> apps = pm.getInstalledApplications(0);
         for (ApplicationInfo app : apps) {
-            // Only show apps that have a launcher intent (user-facing)
-            if (pm.getLaunchIntentForPackage(app.packageName) == null)
-                continue;
             AppItem item = new AppItem();
             item.name = app.loadLabel(pm).toString();
             item.packageName = app.packageName;
