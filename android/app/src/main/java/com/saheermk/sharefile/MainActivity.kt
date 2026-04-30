@@ -111,6 +111,10 @@ class MainActivity : ComponentActivity() {
         var showUrlActions by remember { mutableStateOf(false) }
         var selectedClientForDetails by remember { mutableStateOf<ClientInfo?>(null) }
 
+        // Update State
+        var updateInfo by remember { mutableStateOf<UpdateManager.UpdateInfo?>(null) }
+        var showUpdateDialog by remember { mutableStateOf(false) }
+
         
         // Periodic Status Refresh
         LaunchedEffect(Unit) {
@@ -142,6 +146,13 @@ class MainActivity : ComponentActivity() {
 
             ServerManager.init(context)
             hasPermission = checkAllFilesAccess()
+            
+            // Check for updates
+            val info = UpdateManager.checkForUpdates(context)
+            if (info.isUpdateAvailable) {
+                updateInfo = info
+                showUpdateDialog = true
+            }
             
             // Discover Interfaces
             interfaces.clear()
@@ -1105,6 +1116,29 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+        if (showUpdateDialog && updateInfo != null) {
+            AlertDialog(
+                onDismissRequest = { showUpdateDialog = false },
+                title = { Text("Update Available", color = TextColor, fontWeight = FontWeight.Bold) },
+                text = { Text("A new version (${updateInfo!!.latestVersion}) is available. Would you like to update now?", color = TextColor) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showUpdateDialog = false
+                        UpdateManager.downloadAndInstallUpdate(context, updateInfo!!.downloadUrl, updateInfo!!.latestVersion)
+                        Toast.makeText(context, "Downloading update...", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("Update Now", color = Blue, fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showUpdateDialog = false }) {
+                        Text("Later", color = TextColor.copy(alpha = 0.7f))
+                    }
+                },
+                containerColor = if (isDark) Color(0xFF1E2126) else BgColor,
+                shape = RoundedCornerShape(16.dp)
+            )
         }
     }
     }
